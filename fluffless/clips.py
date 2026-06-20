@@ -17,39 +17,63 @@ from .media import classify_ext
 OUT_DIR = "_fluffless_out"
 
 
-def _preview_ext(src: str, kind: str) -> str:
-    return ".mp4" if kind == "video" else ".m4a"
-
-
 def extract_preview(
     src: str, start: float, end: float, dest_dir: str, tools: Tools, kind: str | None = None,
 ) -> str:
-    """Cut [start, end) from ``src`` into ``dest_dir`` as a re-encoded preview.
+    """Cut [start, end) from ``src`` into ``dest_dir`` as a web-playable preview.
 
-    Re-encoding (rather than stream-copy) keeps the short clip seekable and
-    keyframe-clean for in-browser playback. Returns the output path.
+    Tries progressively more forgiving strategies so a preview is produced
+    across the many ffmpeg builds in the wild (a build without ``libx264``,
+    for instance, is common on Windows and would otherwise fail outright):
+
+      video → re-encode H.264/AAC → stream-copy → audio-only
+      audio → re-encode AAC       → stream-copy
+
+    Returns the path of the first strategy that produces a non-empty file, or
+    raises with the underlying ffmpeg error if every strategy fails.
     """
     tools.require("ffmpeg")
     os.makedirs(dest_dir, exist_ok=True)
     kind = kind or (classify_ext(src) or "audio")
     base = os.path.splitext(os.path.basename(src))[0]
-    out = os.path.join(dest_dir, f"{base}_{int(start*1000)}_{int(end*1000)}{_preview_ext(src, kind)}")
-    dur = max(0.2, end - start)
+    stamp = f"{int(start * 1000)}_{int(end * 1000)}"
+    ss = f"{start:.3f}"
+    t = f"{max(0.2, end - start):.3f}"
+    ff = tools.ffmpeg
+
+    def out_path(ext: str) -> str:
+        return os.path.join(dest_dir, f"{base}_{stamp}{ext}")
+
+    head = [ff, "-v", "error", "-y", "-ss", ss, "-i", src, "-t", t]
+    mp4, m4a = out_path(".mp4"), out_path(".m4a")
     if kind == "video":
-        cmd = [
-            tools.ffmpeg, "-v", "error", "-y",
-            "-ss", f"{start:.3f}", "-i", src, "-t", f"{dur:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-            "-c:a", "aac", "-movflags", "+faststart", out,
+        strategies = [
+            # Best: re-encode — seekable, keyframe-clean, always plays inline.
+            (head + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+                     "-c:a", "aac", "-movflags", "+faststart", mp4], mp4),
+            # No encoder needed — works on a minimal ffmpeg build.
+            (head + ["-c", "copy", "-movflags", "+faststart", mp4], mp4),
+            # Last resort: at least give an audible preview.
+            (head + ["-vn", "-c:a", "aac", "-b:a", "128k", m4a], m4a),
         ]
     else:
-        cmd = [
-            tools.ffmpeg, "-v", "error", "-y",
-            "-ss", f"{start:.3f}", "-i", src, "-t", f"{dur:.3f}",
-            "-c:a", "aac", "-b:a", "128k", out,
+        strategies = [
+            (head + ["-c:a", "aac", "-b:a", "128k", m4a], m4a),
+            (head + ["-c", "copy", m4a], m4a),
         ]
-    run(cmd)
-    return out
+
+    last_error: Exception | None = None
+    for cmd, out in strategies:
+        try:
+            run(cmd)
+        except Exception as exc:  # noqa: BLE001 — try the next strategy
+            last_error = exc
+            continue
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+    raise RuntimeError(
+        f"could not build a preview for {os.path.basename(src)} — {last_error}"
+    )
 
 
 def _complement(segments: list[tuple[float, float]], duration: float) -> list[tuple[float, float]]:

@@ -47,6 +47,7 @@ class ScanJob:
         self.events: "queue.Queue[dict]" = queue.Queue()
         self.started = time.time()
         self.previews = 0
+        self.previews_failed = 0
         self.detect_started: float | None = None
         self.finished = False
 
@@ -99,6 +100,7 @@ def _enrich(payload: dict, job: ScanJob) -> dict:
     elif stage == "done":
         ev["percent"] = 99.0
         ev["message"] = "Finalising"
+    # "warn" passes through untouched — it already carries its message.
     return ev
 
 
@@ -347,7 +349,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 out = extract_preview(mf.path, start, end, st.preview_dir(), st.tools, mf.kind)
                 return os.path.relpath(out, st.preview_dir())
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                job.previews_failed += 1
+                msg = f"Preview failed for {mf.name}: {exc}"
+                print("  ! " + msg)                       # visible in the console
+                job.put({"stage": "warn", "message": msg})
                 return None
 
         def progress(payload: dict) -> None:
@@ -368,6 +374,7 @@ class Handler(BaseHTTPRequestHandler):
                 "new_patterns": result.new_patterns,
                 "matched_patterns": result.matched_patterns,
                 "clips_added": result.clips_added,
+                "previews_failed": job.previews_failed,
                 "patterns": patterns_payload(st.db, folder.name),
             })
         except Exception as exc:  # noqa: BLE001
@@ -478,14 +485,20 @@ class Handler(BaseHTTPRequestHandler):
         st = self.state
         if not st.db:
             return self._error("open a library first")
-        st.tools.require("ffmpeg")
+        if not st.tools.has_ffmpeg:
+            return self._error("ffmpeg is not installed", 503)
         body = self._body()
         clip = st.db.clip(int(body.get("clip_id")))
         if not clip:
             return self._error("unknown clip", 404)
-        out = extract_preview(
-            clip["file_path"], clip["start"], clip["end"], st.preview_dir(), st.tools,
-        )
+        if not os.path.isfile(clip["file_path"]):
+            return self._error(f"source file is missing: {clip['file_name']}", 404)
+        try:
+            out = extract_preview(
+                clip["file_path"], clip["start"], clip["end"], st.preview_dir(), st.tools,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._error(f"Could not build preview: {exc}", 500)
         rel = os.path.relpath(out, st.preview_dir())
         st.db.set_clip_preview(clip["id"], rel)
         self._json({"ok": True, "clip_id": clip["id"]})
