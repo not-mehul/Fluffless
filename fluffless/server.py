@@ -263,6 +263,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_remove()
             if path == "/api/preview":
                 return self._api_make_preview()
+            if path == "/api/clip/adjust":
+                return self._api_clip_adjust()
+            if path == "/api/pattern/adjust":
+                return self._api_pattern_adjust()
             return self._error("not found", 404)
         except ConnectionError:
             pass
@@ -502,6 +506,79 @@ class Handler(BaseHTTPRequestHandler):
         rel = os.path.relpath(out, st.preview_dir())
         st.db.set_clip_preview(clip["id"], rel)
         self._json({"ok": True, "clip_id": clip["id"]})
+
+    def _api_clip_adjust(self) -> None:
+        """Set one clip's exact start/end and rebuild its preview, so the user
+        can fine-tune a single occurrence and hear the result immediately."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        clip = st.db.clip(int(body.get("clip_id")))
+        if not clip:
+            return self._error("unknown clip", 404)
+        try:
+            start = max(0.0, float(body.get("start")))
+            end = float(body.get("end"))
+        except (TypeError, ValueError):
+            return self._error("start and end must be numbers")
+        if end - start < 0.2:
+            return self._error("end must be at least 0.2s after start")
+        st.db.update_clip_bounds(clip["id"], start, end)
+
+        preview_ok, message = self._rebuild_preview(clip["id"])
+        self._json({
+            "ok": True,
+            "clip_id": clip["id"],
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "has_preview": preview_ok,
+            "preview_error": None if preview_ok else message,
+        })
+
+    def _api_pattern_adjust(self) -> None:
+        """Trim head/tail seconds off every clip of a pattern (and the stored
+        fingerprint), then return the refreshed folder patterns."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        row = st.db.pattern(int(body.get("pattern_id")))
+        if not row:
+            return self._error("unknown pattern", 404)
+        try:
+            head = float(body.get("head", 0) or 0)
+            tail = float(body.get("tail", 0) or 0)
+        except (TypeError, ValueError):
+            return self._error("head and tail must be numbers")
+        if head < 0 or tail < 0:
+            return self._error("trim amounts must be 0 or more")
+        if head == 0 and tail == 0:
+            return self._error("nothing to trim")
+        n = st.db.trim_pattern(row["id"], head, tail)
+        self._json({
+            "ok": True,
+            "clips_adjusted": n,
+            "patterns": patterns_payload(st.db, row["folder"]),
+        })
+
+    def _rebuild_preview(self, clip_id: int) -> tuple[bool, str | None]:
+        """Regenerate a clip's preview after its bounds change. Returns
+        (ok, error_message)."""
+        st = self.state
+        if not st.tools.has_ffmpeg:
+            return False, "ffmpeg is not installed"
+        clip = st.db.clip(clip_id)
+        if not clip or not os.path.isfile(clip["file_path"]):
+            return False, "source file is missing"
+        try:
+            out = extract_preview(
+                clip["file_path"], clip["start"], clip["end"], st.preview_dir(), st.tools,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        st.db.set_clip_preview(clip["id"], os.path.relpath(out, st.preview_dir()))
+        return True, None
 
     # --- API: processed & export ---------------------------------------------
 

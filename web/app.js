@@ -418,10 +418,18 @@
             <span class="chip-mono">${p.clips.length} clip${p.clips.length === 1 ? "" : "s"}</span>
           </span>
         </div>
-        <div style="display:flex; gap:0.5rem; align-items:center;">
+        <div class="pattern-controls">
           <div class="pattern-labels">${labelBtns}</div>
+          <button class="pattern-mini trim-btn" title="Trim boundaries">Trim</button>
           <button class="pattern-del" title="Delete pattern">Del</button>
         </div>
+      </div>
+      <div class="trim-panel hidden">
+        <span class="trim-label">Trim every clip —</span>
+        <label class="trim-field">start <input type="number" class="num-input trim-head" min="0" step="0.5" value="0"/>s</label>
+        <label class="trim-field">end <input type="number" class="num-input trim-tail" min="0" step="0.5" value="0"/>s</label>
+        <button class="btn-ghost trim-apply">Apply to all ${p.clips.length}</button>
+        <span class="trim-hint">Trims the start &amp; end of every clip — and tightens future detection.</span>
       </div>
       <div class="clip-list">${clips}</div>`;
 
@@ -429,11 +437,21 @@
       b.addEventListener("click", () => setLabel(p, b.dataset.label, el));
     });
     el.querySelector(".pattern-del").addEventListener("click", () => deletePattern(p.id));
+    el.querySelector(".trim-btn").addEventListener("click", () => {
+      const panel = el.querySelector(".trim-panel");
+      panel.classList.toggle("hidden");
+      el.querySelector(".trim-btn").classList.toggle("active", !panel.classList.contains("hidden"));
+    });
+    el.querySelector(".trim-apply").addEventListener("click", () => applyPatternTrim(p, el));
     el.querySelectorAll(".preview-btn").forEach((b) => {
       b.addEventListener("click", () => playClip(b, p));
     });
     el.querySelectorAll(".gen-btn").forEach((b) => {
       b.addEventListener("click", () => generatePreview(b));
+    });
+    el.querySelectorAll(".adjust-btn").forEach((b) => {
+      const clip = p.clips.find((c) => c.id === Number(b.dataset.clip));
+      b.addEventListener("click", () => toggleClipEditor(b, clip));
     });
     return el;
   }
@@ -445,10 +463,86 @@
       : `<button class="preview-btn gen-btn" data-clip="${c.id}">Generate preview</button>`;
     return `
       <div class="clip" data-clip="${c.id}">
-        <span class="clip-info"><span class="cfile">${escapeHtml(c.file_name)}</span> · ${range}</span>
-        ${action}
+        <span class="clip-info"><span class="cfile">${escapeHtml(c.file_name)}</span> · <span class="crange">${range}</span></span>
+        <div class="clip-actions">
+          ${action}
+          <button class="adjust-btn" data-clip="${c.id}" title="Adjust this clip's boundaries">✎</button>
+        </div>
         <div class="clip-media" data-media="${c.id}"></div>
       </div>`;
+  }
+
+  async function applyPatternTrim(p, el) {
+    const head = parseFloat(el.querySelector(".trim-head").value) || 0;
+    const tail = parseFloat(el.querySelector(".trim-tail").value) || 0;
+    if (head <= 0 && tail <= 0) { toast("Enter a start or end trim amount", "error"); return; }
+    const btn = el.querySelector(".trim-apply");
+    btn.disabled = true;
+    try {
+      const res = await post("/api/pattern/adjust", { pattern_id: p.id, head, tail });
+      state.patterns = res.patterns || state.patterns;
+      renderPatterns();
+      renderRemoveLabels();
+      toast(`Trimmed ${res.clips_adjusted} clip(s) — regenerate previews to verify`, "notice");
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false;
+    }
+  }
+
+  function toggleClipEditor(btn, c) {
+    const clipEl = btn.closest(".clip");
+    const slot = clipEl.querySelector(".clip-media");
+    if (slot.dataset.editor) {
+      slot.innerHTML = ""; delete slot.dataset.editor; delete slot.dataset.loaded;
+      btn.classList.remove("active");
+      return;
+    }
+    slot.innerHTML = `
+      <div class="clip-edit">
+        <div class="edit-fields">
+          <label>start <input type="number" class="num-input edit-start" step="0.1" min="0" value="${c.start}"/>s</label>
+          <label>end <input type="number" class="num-input edit-end" step="0.1" min="0" value="${c.end}"/>s</label>
+          <button class="btn-ghost save-bounds">Save &amp; preview</button>
+        </div>
+        <div class="edit-player"></div>
+      </div>`;
+    slot.dataset.editor = "1";
+    btn.classList.add("active");
+    slot.querySelector(".save-bounds").addEventListener("click", () => saveClipBounds(clipEl, c, slot));
+  }
+
+  async function saveClipBounds(clipEl, c, slot) {
+    const start = parseFloat(slot.querySelector(".edit-start").value);
+    const end = parseFloat(slot.querySelector(".edit-end").value);
+    if (!(end - start >= 0.2)) { toast("End must be at least 0.2s after start", "error"); return; }
+    const saveBtn = slot.querySelector(".save-bounds");
+    saveBtn.disabled = true; saveBtn.textContent = "Saving…";
+    try {
+      const res = await post("/api/clip/adjust", { clip_id: c.id, start, end });
+      c.start = res.start; c.end = res.end; c.has_preview = res.has_preview;
+      updateClipInState(c.id, res.start, res.end, res.has_preview);
+      clipEl.querySelector(".crange").textContent = `${fmtDur(c.start)}–${fmtDur(c.end)}`;
+      if (res.has_preview) {
+        const tag = state.folder && state.folder.kind === "video" ? "video" : "audio";
+        slot.querySelector(".edit-player").innerHTML =
+          `<${tag} controls autoplay src="/api/preview/${c.id}?t=${Date.now()}"></${tag}>`;
+        toast("Saved — playing the refined clip", "notice");
+      } else {
+        toast("Saved" + (res.preview_error ? ` (preview failed: ${res.preview_error})` : ""),
+          res.preview_error ? "error" : "notice");
+      }
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      saveBtn.disabled = false; saveBtn.textContent = "Save & preview";
+    }
+  }
+
+  function updateClipInState(clipId, start, end, hasPreview) {
+    state.patterns.forEach((p) => p.clips.forEach((c) => {
+      if (c.id === clipId) { c.start = start; c.end = end; if (hasPreview !== undefined) c.has_preview = hasPreview; }
+    }));
   }
 
   async function generatePreview(btn) {

@@ -165,6 +165,50 @@ class Database:
         self.conn.execute("UPDATE clips SET preview = ? WHERE id = ?", (preview, clip_id))
         self.conn.commit()
 
+    def update_clip_bounds(self, clip_id: int, start: float, end: float) -> None:
+        """Set a clip's exact start/end and clear its (now stale) preview."""
+        self.conn.execute(
+            "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
+            (start, end, clip_id),
+        )
+        self.conn.commit()
+
+    def trim_pattern(self, pattern_id: int, head: float, tail: float) -> int | None:
+        """Trim ``head`` seconds off the start and ``tail`` off the end of a
+        pattern. Tightens the stored fingerprint (so future scans locate just
+        this, not the surrounding content) and shifts every existing clip's
+        bounds inward by the same amounts, clearing their previews. Returns the
+        number of clips adjusted, or None if the pattern is unknown."""
+        row = self.pattern(pattern_id)
+        if row is None:
+            return None
+        head = max(0.0, head)
+        tail = max(0.0, tail)
+        item_sec = row["item_sec"] or 0.1238
+        items = json.loads(row["items"])
+        h = round(head / item_sec)
+        t = round(tail / item_sec)
+        if len(items) - h - t >= 1:               # keep at least one item
+            items = items[h: len(items) - t] if t else items[h:]
+        new_dur = max(0.1, row["duration"] - head - tail)
+        self.conn.execute(
+            "UPDATE patterns SET items = ?, duration = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(items), new_dur, _now(), pattern_id),
+        )
+        n = 0
+        for c in self.clips(pattern_id):
+            ns = c["start"] + head
+            ne = c["end"] - tail
+            if ne - ns < 0.2:                     # never collapse a clip to nothing
+                ne = ns + 0.2
+            self.conn.execute(
+                "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
+                (ns, ne, c["id"]),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
     def clips(self, pattern_id: int | None = None) -> list[sqlite3.Row]:
         if pattern_id is None:
             return list(self.conn.execute("SELECT * FROM clips ORDER BY id"))
