@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Fluffless workspace + outputs (regenerated on demand)
+.fluffless/
+_fluffless_out/
+
+# Demo media (regenerate with sample/generate_sample.sh)
+sample/**/*.wav
+sample/**/*.mp4
+sample/**/*.m4a
