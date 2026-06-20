@@ -34,6 +34,7 @@ PREVIEW_DIR = "previews"
 # the bar and is where the ETA comes from; detection + previews are the tail.
 FP_SHARE = 0.80
 DETECT_AT = 82.0
+DETECT_END = 97.0
 
 
 class ScanJob:
@@ -46,6 +47,7 @@ class ScanJob:
         self.events: "queue.Queue[dict]" = queue.Queue()
         self.started = time.time()
         self.previews = 0
+        self.detect_started: float | None = None
         self.finished = False
 
     def put(self, event: dict) -> None:
@@ -69,15 +71,28 @@ def _enrich(payload: dict, job: ScanJob) -> dict:
             per_file = elapsed / idx
             ev["eta_seconds"] = round(per_file * (total - idx))
     elif stage == "detect":
+        job.detect_started = time.time()
         ev["percent"] = DETECT_AT
         ev["message"] = f"Finding recurring segments across {payload.get('count', 0)} files"
+    elif stage == "detect_progress":
+        done = payload.get("done", 0)
+        total = payload.get("total", 1) or 1
+        frac = done / total
+        ev["percent"] = round(DETECT_AT + frac * (DETECT_END - DETECT_AT), 1)
+        ev["message"] = "Finding recurring segments"
+        ev["detail"] = f"{done:,} of {total:,} comparisons"
+        if job.detect_started is None:
+            job.detect_started = time.time()
+        det_elapsed = time.time() - job.detect_started
+        if done >= 1:
+            ev["eta_seconds"] = round((det_elapsed / done) * (total - done))
     elif stage == "matched":
         ev["message"] = f"Matched a known {payload.get('label', '')} · {payload.get('file', '')}"
     elif stage == "found":
         ev["message"] = f"New segment · {payload.get('file', '')}"
     elif stage == "preview":
         job.previews += 1
-        ev["percent"] = round(min(98.0, DETECT_AT + job.previews * 0.8), 1)
+        ev["percent"] = round(min(99.0, DETECT_END + job.previews * 0.2), 1)
         ev["message"] = f"Extracting preview · {payload.get('file', '')}"
     elif stage == "error":
         ev["message"] = f"Skipped {payload.get('file', '')}: {payload.get('message', '')}"
@@ -179,6 +194,13 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, message: str, status: int = 400) -> None:
         self._json({"error": message}, status)
 
+    def _safe_error(self, message: str, status: int = 500) -> None:
+        """Report an error, but never raise if the socket is already gone."""
+        try:
+            self._error(message, status)
+        except (ConnectionError, OSError):
+            pass
+
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if not length:
@@ -220,10 +242,10 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 return self._serve_preview(int(m.group(1)))
             return self._error("not found", 404)
-        except BrokenPipeError:
-            pass
+        except ConnectionError:
+            pass  # client hung up (incl. Windows WinError 10053) — nothing to send
         except Exception as exc:  # noqa: BLE001
-            self._error(f"{type(exc).__name__}: {exc}", 500)
+            self._safe_error(f"{type(exc).__name__}: {exc}")
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -240,8 +262,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/preview":
                 return self._api_make_preview()
             return self._error("not found", 404)
+        except ConnectionError:
+            pass
         except Exception as exc:  # noqa: BLE001
-            self._error(f"{type(exc).__name__}: {exc}", 500)
+            self._safe_error(f"{type(exc).__name__}: {exc}")
 
     def do_DELETE(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -375,8 +399,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 if ev.get("stage") == "end":
                     break
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (ConnectionError, OSError):
+            pass  # client closed the stream (refresh, navigate, WinError 10053)
 
     # --- API: patterns & labels ----------------------------------------------
 
@@ -570,7 +594,7 @@ class Handler(BaseHTTPRequestHandler):
                 break
             try:
                 self.wfile.write(chunk)
-            except (BrokenPipeError, ConnectionResetError):
+            except (ConnectionError, OSError):
                 break
             remaining -= len(chunk)
 

@@ -252,9 +252,9 @@
   }
 
   const STAGE_WORDS = {
-    fingerprint: "Reading", detect: "Detecting", matched: "Matching",
-    found: "Detecting", preview: "Previews", done: "Finalising",
-    result: "Complete", error: "Reading",
+    fingerprint: "Reading", detect: "Detecting", detect_progress: "Detecting",
+    matched: "Matching", found: "Detecting", preview: "Previews",
+    done: "Finalising", result: "Complete", error: "Reading",
   };
 
   function handleScanEvent(ev) {
@@ -266,8 +266,8 @@
     }
     if (typeof ev.percent === "number") setScanPercent(ev.percent);
     if (STAGE_WORDS[ev.stage]) $("scanStage").textContent = STAGE_WORDS[ev.stage];
-    if (ev.message) setScanFile(ev.message);
-    if (ev.stage === "fingerprint") setScanEta(ev.eta_seconds);
+    if (ev.detail || ev.message) setScanFile(ev.detail || ev.message);
+    if (ev.stage === "fingerprint" || ev.stage === "detect_progress") setScanEta(ev.eta_seconds);
 
     if (ev.stage === "result") {
       state.patterns = ev.patterns || [];
