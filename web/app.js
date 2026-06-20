@@ -207,6 +207,8 @@
 
   // ---------- scan ----------
   $("scanBtn").addEventListener("click", runScan);
+  let scanSource = null;
+
   async function runScan() {
     const folder = state.folder;
     if (!folder) return;
@@ -217,21 +219,115 @@
     }
     const btn = $("scanBtn");
     btn.disabled = true;
-    $("scanProgress").classList.remove("hidden");
+    startScanUI();
     try {
       const res = await post("/api/scan", { folder: folder.name, files });
-      state.patterns = res.patterns;
-      renderPatterns();
-      renderRemoveLabels();
-      const found = res.new_patterns.length;
-      const matched = res.matched_patterns.length;
-      toast(`Scanned ${res.files_scanned} file(s) · ${found} new · ${matched} matched`, "notice");
+      setScanFile(`${res.total_files} file${res.total_files === 1 ? "" : "s"} queued`);
+      openScanStream();
     } catch (e) {
       toast(e.message, "error");
-    } finally {
+      endScanUI("error", e.message);
       btn.disabled = false;
-      $("scanProgress").classList.add("hidden");
     }
+  }
+
+  function openScanStream() {
+    if (scanSource) { scanSource.close(); scanSource = null; }
+    state.scanDone = false;
+    scanSource = new EventSource("/api/scan/stream");
+    scanSource.onmessage = (e) => {
+      let ev;
+      try { ev = JSON.parse(e.data); } catch { return; }
+      handleScanEvent(ev);
+    };
+    scanSource.onerror = () => {
+      // A normal close (after the 'end' sentinel) is fine; only react if the
+      // stream dropped mid-scan.
+      if (state.scanDone) return;
+      if (scanSource) { scanSource.close(); scanSource = null; }
+      toast("Progress stream lost — the scan may still be running", "error");
+      $("scanBtn").disabled = false;
+      loadPatterns();
+    };
+  }
+
+  const STAGE_WORDS = {
+    fingerprint: "Reading", detect: "Detecting", matched: "Matching",
+    found: "Detecting", preview: "Previews", done: "Finalising",
+    result: "Complete", error: "Reading",
+  };
+
+  function handleScanEvent(ev) {
+    if (ev.stage === "end") { closeScan(); return; }
+    if (ev.stage === "fatal") {
+      toast(ev.message || "Scan failed", "error");
+      endScanUI("error", ev.message || "Scan failed");
+      return;
+    }
+    if (typeof ev.percent === "number") setScanPercent(ev.percent);
+    if (STAGE_WORDS[ev.stage]) $("scanStage").textContent = STAGE_WORDS[ev.stage];
+    if (ev.message) setScanFile(ev.message);
+    if (ev.stage === "fingerprint") setScanEta(ev.eta_seconds);
+
+    if (ev.stage === "result") {
+      state.patterns = ev.patterns || [];
+      renderPatterns();
+      renderRemoveLabels();
+      endScanUI("complete");
+      const found = (ev.new_patterns || []).length;
+      const matched = (ev.matched_patterns || []).length;
+      toast(`Scanned ${ev.files_scanned} file(s) · ${found} new · ${matched} matched`, "notice");
+    }
+  }
+
+  function closeScan() {
+    state.scanDone = true;
+    if (scanSource) { scanSource.close(); scanSource = null; }
+    $("scanBtn").disabled = false;
+  }
+
+  // --- scan progress UI helpers ---
+  function startScanUI() {
+    const box = $("scanStatus");
+    box.classList.remove("hidden", "complete", "error");
+    state.scanPct = 0;
+    $("scanStage").textContent = "Starting";
+    $("scanPct").textContent = "0%";
+    $("scanBar").querySelector(".bar").style.width = "0%";
+    $("scanFile").textContent = "";
+    $("scanEta").textContent = "";
+  }
+  function setScanPercent(p) {
+    p = Math.max(state.scanPct || 0, Math.min(100, p)); // keep the bar monotonic
+    state.scanPct = p;
+    $("scanBar").querySelector(".bar").style.width = p + "%";
+    $("scanPct").textContent = Math.round(p) + "%";
+  }
+  function setScanFile(t) { $("scanFile").textContent = t || ""; }
+  function setScanEta(s) { $("scanEta").textContent = fmtEta(s); }
+  function endScanUI(kind, msg) {
+    closeScan();
+    const box = $("scanStatus");
+    if (kind === "complete") {
+      box.classList.add("complete");
+      setScanPercent(100);
+      $("scanStage").textContent = "Complete";
+      $("scanEta").textContent = "";
+    } else if (kind === "error") {
+      box.classList.add("error");
+      $("scanStage").textContent = "Failed";
+      if (msg) setScanFile(msg);
+      $("scanEta").textContent = "";
+    } else {
+      box.classList.add("hidden");
+    }
+  }
+  function fmtEta(s) {
+    if (s == null) return "estimating…";
+    if (s <= 1) return "almost done";
+    if (s < 60) return `~${Math.round(s)}s left`;
+    const m = Math.floor(s / 60), sec = Math.round(s % 60);
+    return sec ? `~${m}m ${sec}s left` : `~${m}m left`;
   }
 
   async function loadPatterns() {

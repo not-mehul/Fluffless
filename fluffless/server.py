@@ -12,8 +12,10 @@ import json
 import mimetypes
 import os
 import posixpath
+import queue
 import re
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -27,6 +29,91 @@ from .scan import scan_folder
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 PREVIEW_DIR = "previews"
 
+# How the scan's phases divide the 0–100% bar. Fingerprinting (reading every
+# file) is the bulk and the part with a clean denominator, so it owns most of
+# the bar and is where the ETA comes from; detection + previews are the tail.
+FP_SHARE = 0.80
+DETECT_AT = 82.0
+
+
+class ScanJob:
+    """A single in-flight scan. Progress events are buffered in a queue so the
+    SSE endpoint can stream them even if it connects a moment after the start."""
+
+    def __init__(self, folder: str, total_files: int) -> None:
+        self.folder = folder
+        self.total_files = total_files
+        self.events: "queue.Queue[dict]" = queue.Queue()
+        self.started = time.time()
+        self.previews = 0
+        self.finished = False
+
+    def put(self, event: dict) -> None:
+        self.events.put(event)
+
+
+def _enrich(payload: dict, job: ScanJob) -> dict:
+    """Turn a raw engine event into a UI event with percent, ETA, and a line of
+    human copy. Keeps the engine (scan.py) free of any timing concerns."""
+    stage = payload.get("stage")
+    ev = dict(payload)
+    elapsed = time.time() - job.started
+
+    if stage == "fingerprint":
+        idx = payload.get("index", 0)
+        total = payload.get("total", job.total_files) or 1
+        ev["percent"] = round((idx / total) * FP_SHARE * 100, 1)
+        ev["message"] = f"Fingerprinting · {payload.get('file', '')}"
+        ev["detail"] = f"{idx + 1} of {total}"
+        if idx >= 1:                       # need at least one finished file to estimate
+            per_file = elapsed / idx
+            ev["eta_seconds"] = round(per_file * (total - idx))
+    elif stage == "detect":
+        ev["percent"] = DETECT_AT
+        ev["message"] = f"Finding recurring segments across {payload.get('count', 0)} files"
+    elif stage == "matched":
+        ev["message"] = f"Matched a known {payload.get('label', '')} · {payload.get('file', '')}"
+    elif stage == "found":
+        ev["message"] = f"New segment · {payload.get('file', '')}"
+    elif stage == "preview":
+        job.previews += 1
+        ev["percent"] = round(min(98.0, DETECT_AT + job.previews * 0.8), 1)
+        ev["message"] = f"Extracting preview · {payload.get('file', '')}"
+    elif stage == "error":
+        ev["message"] = f"Skipped {payload.get('file', '')}: {payload.get('message', '')}"
+    elif stage == "done":
+        ev["percent"] = 99.0
+        ev["message"] = "Finalising"
+    return ev
+
+
+def patterns_payload(db: Database, folder: str | None) -> list[dict]:
+    """Serialise patterns (with their clips) for the UI. Shared by the patterns
+    endpoint and the scan-job result event."""
+    out = []
+    for row in db.patterns(folder):
+        clips = [
+            {
+                "id": c["id"],
+                "file_name": c["file_name"],
+                "file_path": c["file_path"],
+                "start": round(c["start"], 2),
+                "end": round(c["end"], 2),
+                "has_preview": bool(c["preview"]),
+            }
+            for c in db.clips(row["id"])
+        ]
+        out.append({
+            "id": row["id"],
+            "folder": row["folder"],
+            "label": row["label"],
+            "duration": round(row["duration"], 2),
+            "shows": row["shows"],
+            "bits": row["bits"],
+            "clips": clips,
+        })
+    return out
+
 
 class AppState:
     """Server-wide state: the active library, its database, and a folder cache."""
@@ -37,6 +124,8 @@ class AppState:
         self.db: Database | None = None
         self.folders: list = []
         self.lock = threading.Lock()
+        self.scan_job: ScanJob | None = None
+        self.scan_lock = threading.Lock()
 
     def open_library(self, path: str) -> dict:
         path = os.path.abspath(os.path.expanduser(path))
@@ -117,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_status()
             if path == "/api/folders":
                 return self._api_folders()
+            if path == "/api/scan/stream":
+                return self._api_scan_stream()
             if path == "/api/patterns":
                 return self._api_patterns(qs)
             if path == "/api/processed":
@@ -185,50 +276,107 @@ class Handler(BaseHTTPRequestHandler):
     def _api_folders(self) -> None:
         self._json({"folders": [f.to_dict() for f in self.state.folders]})
 
-    # --- API: scan -----------------------------------------------------------
+    # --- API: scan (non-blocking, with a streamed progress feed) -------------
 
     def _api_scan(self) -> None:
+        """Start a scan in the background and return immediately. Progress is
+        delivered over the SSE endpoint ``/api/scan/stream``."""
         st = self.state
         if not st.db or not st.library:
             return self._error("open a library first")
-        body = self._body()
-        folder_name = body.get("folder")
-        folder = st.folder(folder_name)
-        if not folder:
-            return self._error(f"unknown folder: {folder_name}", 404)
+        with st.scan_lock:
+            if st.scan_job and not st.scan_job.finished:
+                return self._error("a scan is already running", 409)
 
-        chosen = body.get("files")  # optional list of file paths for a partial scan
-        files = folder.files
-        if chosen:
-            wanted = set(chosen)
-            files = [f for f in folder.files if f.path in wanted]
-        if not files:
-            return self._error("no files selected")
+            body = self._body()
+            folder = st.folder(body.get("folder"))
+            if not folder:
+                return self._error(f"unknown folder: {body.get('folder')}", 404)
 
-        params = _params_from(body)
+            chosen = body.get("files")  # optional subset for a partial scan
+            files = folder.files
+            if chosen:
+                wanted = set(chosen)
+                files = [f for f in folder.files if f.path in wanted]
+            if not files:
+                return self._error("no files selected")
+
+            params = _params_from(body)
+            job = ScanJob(folder.name, len(files))
+            st.scan_job = job
+
+        thread = threading.Thread(
+            target=self._run_scan_job, args=(job, folder, files, params), daemon=True,
+        )
+        thread.start()
+        self._json({"ok": True, "folder": folder.name, "total_files": len(files)})
+
+    def _run_scan_job(self, job: ScanJob, folder, files, params) -> None:
+        """Worker thread: runs the scan, pushing enriched progress events into
+        the job queue, then a final ``result`` event and an ``end`` sentinel."""
+        st = self.state
 
         def make_preview(mf: MediaFile, start: float, end: float):
             if not st.tools.has_ffmpeg:
                 return None
+            job.put(_enrich({"stage": "preview", "file": mf.name}, job))
             try:
                 out = extract_preview(mf.path, start, end, st.preview_dir(), st.tools, mf.kind)
                 return os.path.relpath(out, st.preview_dir())
             except Exception:
                 return None
 
-        with st.lock:
-            result = scan_folder(
-                st.db, st.library, folder.name, files, st.tools,
-                params=params, make_preview=make_preview,
-            )
-        self._json({
-            "folder": folder.name,
-            "files_scanned": result.files_scanned,
-            "new_patterns": result.new_patterns,
-            "matched_patterns": result.matched_patterns,
-            "clips_added": result.clips_added,
-            "patterns": self._patterns_payload(folder.name),
-        })
+        def progress(payload: dict) -> None:
+            job.put(_enrich(payload, job))
+
+        try:
+            with st.lock:
+                result = scan_folder(
+                    st.db, st.library, folder.name, files, st.tools,
+                    params=params, progress=progress, make_preview=make_preview,
+                )
+            job.put({
+                "stage": "result",
+                "percent": 100.0,
+                "message": "Scan complete",
+                "folder": folder.name,
+                "files_scanned": result.files_scanned,
+                "new_patterns": result.new_patterns,
+                "matched_patterns": result.matched_patterns,
+                "clips_added": result.clips_added,
+                "patterns": patterns_payload(st.db, folder.name),
+            })
+        except Exception as exc:  # noqa: BLE001
+            job.put({"stage": "fatal", "message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            job.put({"stage": "end"})
+            job.finished = True
+
+    def _api_scan_stream(self) -> None:
+        """Server-Sent Events feed for the active scan job."""
+        job = self.state.scan_job
+        if not job:
+            return self._error("no scan running", 404)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            while True:
+                try:
+                    ev = job.events.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")   # heartbeat keeps the socket open
+                    self.wfile.flush()
+                    continue
+                self.wfile.write(b"data: " + json.dumps(ev).encode("utf-8") + b"\n\n")
+                self.wfile.flush()
+                if ev.get("stage") == "end":
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     # --- API: patterns & labels ----------------------------------------------
 
@@ -236,34 +384,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.state.db:
             return self._error("open a library first")
         folder = (qs.get("folder") or [None])[0]
-        self._json({"patterns": self._patterns_payload(folder)})
-
-    def _patterns_payload(self, folder: str | None) -> list[dict]:
-        db = self.state.db
-        assert db
-        out = []
-        for row in db.patterns(folder):
-            clips = [
-                {
-                    "id": c["id"],
-                    "file_name": c["file_name"],
-                    "file_path": c["file_path"],
-                    "start": round(c["start"], 2),
-                    "end": round(c["end"], 2),
-                    "has_preview": bool(c["preview"]),
-                }
-                for c in db.clips(row["id"])
-            ]
-            out.append({
-                "id": row["id"],
-                "folder": row["folder"],
-                "label": row["label"],
-                "duration": round(row["duration"], 2),
-                "shows": row["shows"],
-                "bits": row["bits"],
-                "clips": clips,
-            })
-        return out
+        self._json({"patterns": patterns_payload(self.state.db, folder)})
 
     def _api_label(self) -> None:
         if not self.state.db:
