@@ -45,21 +45,28 @@ def extract_preview(
         return os.path.join(dest_dir, f"{base}_{stamp}{ext}")
 
     head = [ff, "-v", "error", "-y", "-ss", ss, "-i", src, "-t", t]
+    src_ext = os.path.splitext(src)[1].lower() or ".mka"
     mp4, m4a = out_path(".mp4"), out_path(".m4a")
     if kind == "video":
+        # Map only the first video + first audio so cover-art / extra streams
+        # never reach the muxer.
+        sel = ["-map", "0:v:0?", "-map", "0:a:0?"]
         strategies = [
             # Best: re-encode — seekable, keyframe-clean, always plays inline.
-            (head + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-                     "-c:a", "aac", "-movflags", "+faststart", mp4], mp4),
+            (head + sel + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+                           "-c:a", "aac", "-movflags", "+faststart", mp4], mp4),
             # No encoder needed — works on a minimal ffmpeg build.
-            (head + ["-c", "copy", "-movflags", "+faststart", mp4], mp4),
+            (head + sel + ["-c", "copy", "-movflags", "+faststart", mp4], mp4),
             # Last resort: at least give an audible preview.
             (head + ["-vn", "-c:a", "aac", "-b:a", "128k", m4a], m4a),
         ]
     else:
+        # `-vn` drops embedded cover art (common in MP3/M4A), which otherwise
+        # breaks the muxer. The copy fallback keeps the source's own container
+        # so an MP3 stream isn't forced into an incompatible .m4a.
         strategies = [
-            (head + ["-c:a", "aac", "-b:a", "128k", m4a], m4a),
-            (head + ["-c", "copy", m4a], m4a),
+            (head + ["-vn", "-c:a", "aac", "-b:a", "128k", m4a], m4a),
+            (head + ["-vn", "-c:a", "copy", out_path(src_ext)], out_path(src_ext)),
         ]
 
     last_error: Exception | None = None
