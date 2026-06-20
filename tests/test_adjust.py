@@ -50,3 +50,24 @@ def test_trim_pattern_never_collapses_a_clip():
         # The stored fingerprint keeps at least one item too.
         assert len(db.pattern_items(db.pattern(pid))) >= 1
         db.close()
+
+
+def test_propagate_from_clip_applies_same_trim_to_all():
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as root:
+        db = Database.open(root)
+        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0, "Ad")
+        a = db.add_clip(pid, "/x/ep1.mp3", 10.0, 14.0)
+        b = db.add_clip(pid, "/x/ep2.mp3", 22.0, 26.0)
+        c = db.add_clip(pid, "/x/ep3.mp3", 5.0, 9.0)
+        db.update_clip_bounds(a, 11.5, 13.0)            # refine one: -1.5 head, -1.0 tail
+        n, head, tail = db.propagate_from_clip(a)
+        assert (n, head, tail) == (3, 1.5, 1.0)
+        # every clip shifts from its OWN detected bounds by the same amounts
+        assert (round(db.clip(b)["start"], 2), round(db.clip(b)["end"], 2)) == (23.5, 25.0)
+        assert (round(db.clip(c)["start"], 2), round(db.clip(c)["end"], 2)) == (6.5, 8.0)
+        # fingerprint tightened to the refined length, and it is idempotent
+        assert len(db.pattern_items(db.pattern(pid))) == 15
+        db.propagate_from_clip(a)
+        assert (round(db.clip(b)["start"], 2), round(db.clip(b)["end"], 2)) == (23.5, 25.0)
+        db.close()

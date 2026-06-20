@@ -476,6 +476,9 @@ body { transition: background 0.3s; }
 
 .clip-edit { display: flex; flex-direction: column; gap: 0.65rem; padding: 0.5rem 0 0.2rem; }
 .edit-fields { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
+.edit-hint { font-family: var(--serif); font-style: italic; font-size: 0.78rem; color: var(--text-faint);
+  margin: 0; }
+.edit-hint em { color: var(--text-muted); }
 .edit-player:not(:empty) { margin-top: 0.2rem; }
 .edit-player audio, .edit-player video { width: 100%; border-radius: 2px; }
 .edit-player video { max-height: 220px; background: #000; }

@@ -426,10 +426,10 @@
       </div>
       <div class="trim-panel hidden">
         <span class="trim-label">Trim every clip —</span>
-        <label class="trim-field">start <input type="number" class="num-input trim-head" min="0" step="0.5" value="0"/>s</label>
-        <label class="trim-field">end <input type="number" class="num-input trim-tail" min="0" step="0.5" value="0"/>s</label>
+        <label class="trim-field">start <input type="number" class="num-input trim-head" min="0" step="0.5" value="${p.head_trim || 0}"/>s</label>
+        <label class="trim-field">end <input type="number" class="num-input trim-tail" min="0" step="0.5" value="${p.tail_trim || 0}"/>s</label>
         <button class="btn-ghost trim-apply">Apply to all ${p.clips.length}</button>
-        <span class="trim-hint">Trims the start &amp; end of every clip — and tightens future detection.</span>
+        <span class="trim-hint">Seconds to trim off the detected start &amp; end of every clip — also tightens future detection. Re-applying the same values changes nothing.</span>
       </div>
       <div class="clip-list">${clips}</div>`;
 
@@ -451,7 +451,7 @@
     });
     el.querySelectorAll(".adjust-btn").forEach((b) => {
       const clip = p.clips.find((c) => c.id === Number(b.dataset.clip));
-      b.addEventListener("click", () => toggleClipEditor(b, clip));
+      b.addEventListener("click", () => toggleClipEditor(b, clip, p));
     });
     return el;
   }
@@ -490,7 +490,7 @@
     }
   }
 
-  function toggleClipEditor(btn, c) {
+  function toggleClipEditor(btn, c, p) {
     const clipEl = btn.closest(".clip");
     const slot = clipEl.querySelector(".clip-media");
     if (slot.dataset.editor) {
@@ -498,18 +498,44 @@
       btn.classList.remove("active");
       return;
     }
+    const n = p.clips.length;
     slot.innerHTML = `
       <div class="clip-edit">
         <div class="edit-fields">
           <label>start <input type="number" class="num-input edit-start" step="0.1" min="0" value="${c.start}"/>s</label>
           <label>end <input type="number" class="num-input edit-end" step="0.1" min="0" value="${c.end}"/>s</label>
           <button class="btn-ghost save-bounds">Save &amp; preview</button>
+          ${n > 1 ? `<button class="btn-ghost apply-all">Apply to all ${n}</button>` : ""}
         </div>
+        ${n > 1 ? `<p class="edit-hint"><em>Apply to all.</em> Trim every clip of this pattern by the same amount you trimmed here — and tighten future detection to match.</p>` : ""}
         <div class="edit-player"></div>
       </div>`;
     slot.dataset.editor = "1";
     btn.classList.add("active");
     slot.querySelector(".save-bounds").addEventListener("click", () => saveClipBounds(clipEl, c, slot));
+    const applyBtn = slot.querySelector(".apply-all");
+    if (applyBtn) applyBtn.addEventListener("click", () => applyClipToAll(c, p, slot));
+  }
+
+  async function applyClipToAll(c, p, slot) {
+    const start = parseFloat(slot.querySelector(".edit-start").value);
+    const end = parseFloat(slot.querySelector(".edit-end").value);
+    if (!(end - start >= 0.2)) { toast("End must be at least 0.2s after start", "error"); return; }
+    const btn = slot.querySelector(".apply-all");
+    btn.disabled = true; btn.textContent = "Applying…";
+    try {
+      const res = await post("/api/clip/propagate", { clip_id: c.id, start, end });
+      state.patterns = res.patterns || state.patterns;
+      renderPatterns();
+      renderRemoveLabels();
+      const trim = [];
+      if (res.head) trim.push(`${res.head}s off the start`);
+      if (res.tail) trim.push(`${res.tail}s off the end`);
+      toast(`Trimmed ${trim.join(" and ") || "boundaries"} on all ${res.clips_adjusted} clip(s)`, "notice");
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false; btn.textContent = `Apply to all ${p.clips.length}`;
+    }
   }
 
   async function saveClipBounds(clipEl, c, slot) {
