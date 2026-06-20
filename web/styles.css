@@ -303,14 +303,43 @@ body { transition: background 0.3s; }
 .segmented button:hover { background: var(--hover-bg); color: var(--text-heading); }
 .segmented button.active { background: var(--accent-bright); color: var(--on-accent); font-weight: 500; }
 
+/* Collapsible, capped-height file list — a long library never pushes the scan
+   button and results off-screen. */
+.files { margin-top: 0.25rem; }
+.files-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; margin-bottom: 0.6rem; min-height: 1.5rem; }
+.files-toggle { display: flex; align-items: center; gap: 0.55rem; background: none;
+  border: none; cursor: pointer; padding: 0; }
+.files-toggle .chev { color: var(--text-dim); font-size: 0.7rem; transition: transform 0.2s; line-height: 1; }
+.files.collapsed .files-toggle .chev { transform: rotate(-90deg); }
+.files-toggle:hover .field-label { color: var(--text-heading); }
+.count-chip { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.06em;
+  color: var(--text-dim); border: 1px solid var(--border-faint); background: var(--chip-bg);
+  border-radius: 2px; padding: 0.05rem 0.4rem; }
+.head-chip { align-self: center; margin-left: 0.5rem; }
+.files-tools { display: flex; align-items: center; gap: 0.6rem; }
+.files-tools .sel-count { font-family: var(--mono); font-size: 0.62rem; color: var(--text-faint);
+  letter-spacing: 0.04em; }
+.files-tools .tool-sep { color: var(--text-faint); }
+.link-btn { background: none; border: none; cursor: pointer; font-family: var(--mono);
+  font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-amber); padding: 0; }
+.link-btn:hover { color: var(--text-heading); }
+
 .file-list { display: flex; flex-direction: column; gap: 1px; background: var(--border-faint);
-  border: 1px solid var(--border-soft); border-radius: 2px; overflow: hidden; }
+  border: 1px solid var(--border-soft); border-radius: 2px; overflow-y: auto; overflow-x: hidden;
+  max-height: 19rem; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.files.collapsed .file-list { display: none; }
+.file-list::-webkit-scrollbar { width: 8px; }
+.file-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.file-list::-webkit-scrollbar-track { background: transparent; }
 .file-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.6rem 0.8rem;
   background: var(--panel-bg); }
+.file-row.pick { cursor: pointer; }
+.file-row.pick:hover { background: var(--hover-bg); }
 .file-row .fname { font-family: var(--serif); font-size: 0.95rem; color: var(--text-body); flex: 1;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-row .fmeta { font-family: var(--mono); font-size: 0.62rem; color: var(--text-faint);
-  letter-spacing: 0.08em; }
+  letter-spacing: 0.08em; flex: none; }
 .file-row.processed .fname::after { content: " · trimmed"; color: var(--accent-sage); font-family: var(--mono);
   font-size: 0.6rem; font-style: normal; }
 
@@ -397,7 +426,12 @@ body { transition: background 0.3s; }
 .pattern-labels button:hover { background: var(--hover-bg); color: var(--text-heading); }
 .pattern-labels button.active { background: var(--accent-bright); color: var(--on-accent); font-weight: 500; }
 
-.clip-list { margin-top: 0.85rem; display: flex; flex-direction: column; gap: 0.6rem; }
+.clip-list { margin-top: 0.85rem; display: flex; flex-direction: column; gap: 0.6rem;
+  max-height: 22rem; overflow-y: auto; overflow-x: hidden;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.clip-list::-webkit-scrollbar { width: 8px; }
+.clip-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.clip-list::-webkit-scrollbar-track { background: transparent; }
 .clip {
   display: grid; grid-template-columns: 1fr auto; gap: 0.6rem 1rem; align-items: center;
   border-top: 1px solid var(--border-faint); padding-top: 0.6rem;

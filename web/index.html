@@ -82,7 +82,24 @@
             <button data-scope="partial">Selected</button>
           </div>
         </div>
-        <div class="file-list" id="fileList"></div>
+
+        <div class="files" id="filesBlock">
+          <div class="files-head">
+            <button class="files-toggle" id="filesToggle" aria-expanded="true" aria-controls="fileList">
+              <span class="chev" aria-hidden="true">▾</span>
+              <span class="field-label">Files</span>
+              <span class="count-chip" id="filesCount">0</span>
+            </button>
+            <div class="files-tools hidden" id="filesTools">
+              <span class="sel-count" id="selCount"></span>
+              <button class="link-btn" id="selectAll">All</button>
+              <span class="tool-sep">·</span>
+              <button class="link-btn" id="selectNone">None</button>
+            </div>
+          </div>
+          <div class="file-list" id="fileList"></div>
+        </div>
+
         <div class="control-foot">
           <p class="hint" id="scanHint"><em>Scan.</em> Fingerprints each file, finds segments
             that recur across the set, and matches anything already catalogued.</p>
@@ -106,6 +123,7 @@
         <div class="section-head">
           <span class="marker">Duplicates.</span>
           <h3 class="section-subtitle">Recurring segments found</h3>
+          <span class="count-chip head-chip hidden" id="dupCount"></span>
         </div>
         <div id="patternsList"></div>
       </div>
