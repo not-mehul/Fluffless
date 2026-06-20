@@ -34,6 +34,7 @@ PREVIEW_DIR = "previews"
 # the bar and is where the ETA comes from; detection + previews are the tail.
 FP_SHARE = 0.80
 DETECT_AT = 82.0
+DETECT_END = 97.0
 
 
 class ScanJob:
@@ -46,6 +47,7 @@ class ScanJob:
         self.events: "queue.Queue[dict]" = queue.Queue()
         self.started = time.time()
         self.previews = 0
+        self.detect_started: float | None = None
         self.finished = False
 
     def put(self, event: dict) -> None:
@@ -69,15 +71,28 @@ def _enrich(payload: dict, job: ScanJob) -> dict:
             per_file = elapsed / idx
             ev["eta_seconds"] = round(per_file * (total - idx))
     elif stage == "detect":
+        job.detect_started = time.time()
         ev["percent"] = DETECT_AT
         ev["message"] = f"Finding recurring segments across {payload.get('count', 0)} files"
+    elif stage == "detect_progress":
+        done = payload.get("done", 0)
+        total = payload.get("total", 1) or 1
+        frac = done / total
+        ev["percent"] = round(DETECT_AT + frac * (DETECT_END - DETECT_AT), 1)
+        ev["message"] = "Finding recurring segments"
+        ev["detail"] = f"{done:,} of {total:,} comparisons"
+        if job.detect_started is None:
+            job.detect_started = time.time()
+        det_elapsed = time.time() - job.detect_started
+        if done >= 1:
+            ev["eta_seconds"] = round((det_elapsed / done) * (total - done))
     elif stage == "matched":
         ev["message"] = f"Matched a known {payload.get('label', '')} · {payload.get('file', '')}"
     elif stage == "found":
         ev["message"] = f"New segment · {payload.get('file', '')}"
     elif stage == "preview":
         job.previews += 1
-        ev["percent"] = round(min(98.0, DETECT_AT + job.previews * 0.8), 1)
+        ev["percent"] = round(min(99.0, DETECT_END + job.previews * 0.2), 1)
         ev["message"] = f"Extracting preview · {payload.get('file', '')}"
     elif stage == "error":
         ev["message"] = f"Skipped {payload.get('file', '')}: {payload.get('message', '')}"

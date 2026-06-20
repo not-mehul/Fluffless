@@ -110,7 +110,13 @@ def scan_folder(
             continue  # need at least min_shows files to recur against
         p = base.scaled(bits)
         _emit(progress, stage="detect", count=len(group))
-        segs_per_file = recurring_segments([fp for _, fp in group], p)
+
+        def _det_progress(done: int, total: int) -> None:
+            _emit(progress, stage="detect_progress", done=done, total=total)
+
+        segs_per_file = recurring_segments(
+            [fp for _, fp in group], p, on_progress=_det_progress,
+        )
         for (mf, fp), segs in zip(group, segs_per_file):  # noqa: B905
             for start, end in segs:
                 pid = _store_segment(db, library, folder, mf, fp, start, end, p, make_preview)
