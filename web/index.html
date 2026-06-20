@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0f0d0b" />
   <title>Fluffless — remove the fluff</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -87,7 +88,17 @@
             that recur across the set, and matches anything already catalogued.</p>
           <button class="btn-primary" id="scanBtn"><span class="btn-label">Scan media</span></button>
         </div>
-        <div class="progress indeterminate hidden" id="scanProgress"><div class="bar"></div></div>
+        <div class="scan-status hidden" id="scanStatus">
+          <div class="scan-line">
+            <span class="scan-stage" id="scanStage">Starting</span>
+            <span class="scan-pct" id="scanPct">0%</span>
+          </div>
+          <div class="progress" id="scanBar"><div class="bar"></div></div>
+          <div class="scan-line sub">
+            <span class="scan-file" id="scanFile"></span>
+            <span class="scan-eta" id="scanEta"></span>
+          </div>
+        </div>
       </div>
 
       <!-- Duplicates / patterns -->

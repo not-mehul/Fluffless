@@ -47,7 +47,7 @@ algorithm and its tuning dials are documented in
 | :-- | :-- |
 | **Open a library** | A root folder of show folders. Each is shown as a card with an **audio** or **video** logo and a file count. |
 | **Pick a folder, choose scope** | Scan **all** files (default) or a **selected** subset. |
-| **Scan** | Fingerprints the files, finds recurring segments, matches anything already catalogued, extracts a previewable clip for each, and stores it all. |
+| **Scan** | Fingerprints the files, finds recurring segments, matches anything already catalogued, extracts a previewable clip for each, and stores it all. A **live progress tracker** streams the current file, percent complete, and a time-remaining estimate over Server-Sent Events — built for batches of "a ton of media". |
 | **Review duplicates** | Each pattern is a row you can **preview** (in-tool playback) as many times as needed, then **catalogue** as `Ad`, `Intro`, `Outro`, or `Other`. |
 | **Remove the fluff** | Choose which labels to cut (default `Ad`; add `Intro`/`Outro`/`Other`). Trimmed copies are written to `_fluffless_out/`; originals and the catalogue are preserved. |
 | **Export** | The whole database exports to **JSON** (round-trippable) or **Markdown** (inspectable backup). |
