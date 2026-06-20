@@ -66,6 +66,8 @@
     folder: null,        // active folder object
     scope: "all",
     selectedFiles: new Set(),
+    filesCollapsed: false,
+    processedNames: new Set(),
     patterns: [],
     removeLabels: new Set(["Ad"]),
   };
@@ -153,6 +155,7 @@
     state.folder = folder;
     state.scope = "all";
     state.selectedFiles = new Set(folder.files.map((f) => f.path));
+    state.filesCollapsed = folder.files.length > COLLAPSE_THRESHOLD;
     $("foldersSection").classList.add("hidden");
     showWorkspace(true);
     $("wsTitle").textContent = folder.name;
@@ -161,8 +164,14 @@
       b.classList.toggle("active", b.dataset.scope === "all"));
     renderFileList();
     renderRemoveLabels();
-    await loadPatterns();
+    await Promise.all([loadPatterns(), refreshProcessed()]);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  const COLLAPSE_THRESHOLD = 8;
+  function applyFilesCollapsed() {
+    $("filesBlock").classList.toggle("collapsed", !!state.filesCollapsed);
+    $("filesToggle").setAttribute("aria-expanded", state.filesCollapsed ? "false" : "true");
   }
 
   function showWorkspace(on) {
@@ -177,17 +186,35 @@
       state.scope = btn.dataset.scope;
       document.querySelectorAll("#scopeSeg button").forEach((b) =>
         b.classList.toggle("active", b === btn));
+      if (state.scope === "partial") state.filesCollapsed = false; // reveal to pick
       renderFileList();
     });
+  });
+
+  // file-list controls
+  $("filesToggle").addEventListener("click", () => {
+    state.filesCollapsed = !state.filesCollapsed;
+    applyFilesCollapsed();
+  });
+  $("selectAll").addEventListener("click", () => {
+    state.selectedFiles = new Set(state.folder.files.map((f) => f.path));
+    renderFileList();
+  });
+  $("selectNone").addEventListener("click", () => {
+    state.selectedFiles = new Set();
+    renderFileList();
   });
 
   function renderFileList() {
     const list = $("fileList");
     const partial = state.scope === "partial";
+    $("filesTools").classList.toggle("hidden", !partial);
+    $("filesCount").textContent = String(state.folder.files.length);
     list.innerHTML = "";
     state.folder.files.forEach((f) => {
-      const row = document.createElement("label");
-      row.className = "file-row check";
+      const done = state.processedNames && state.processedNames.has(f.name);
+      const row = document.createElement(partial ? "label" : "div");
+      row.className = "file-row" + (partial ? " check pick" : "") + (done ? " processed" : "");
       const checked = state.selectedFiles.has(f.path);
       row.innerHTML = `
         ${partial ? `<input type="checkbox" ${checked ? "checked" : ""}/>
@@ -199,10 +226,18 @@
         cb.addEventListener("change", () => {
           if (cb.checked) state.selectedFiles.add(f.path);
           else state.selectedFiles.delete(f.path);
+          updateSelCount();
         });
       }
       list.appendChild(row);
     });
+    updateSelCount();
+    applyFilesCollapsed();
+  }
+
+  function updateSelCount() {
+    if (state.scope !== "partial" || !state.folder) return;
+    $("selCount").textContent = `${state.selectedFiles.size} of ${state.folder.files.length}`;
   }
 
   // ---------- scan ----------
@@ -341,11 +376,15 @@
   // ---------- patterns ----------
   function renderPatterns() {
     const wrap = $("patternsList");
+    const chip = $("dupCount");
     if (!state.patterns.length) {
+      chip.classList.add("hidden");
       wrap.innerHTML = emptyState("No duplicates catalogued yet",
         "Run a scan to find segments that recur across these files.");
       return;
     }
+    chip.textContent = String(state.patterns.length);
+    chip.classList.remove("hidden");
     wrap.innerHTML = "";
     state.patterns.forEach((p) => wrap.appendChild(renderPattern(p)));
   }
@@ -528,6 +567,8 @@
   async function refreshProcessed() {
     try {
       const res = await api("/api/processed");
+      state.processedNames = new Set(res.processed.map((r) => r.file_name));
+      if (state.folder) renderFileList();   // reflect "trimmed" tags in the list
       const wrap = $("processedList");
       if (!res.processed.length) {
         wrap.innerHTML = `<p class="hint"><em>History.</em> Files you trim will be logged here and preserved across runs.</p>`;
