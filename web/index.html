@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0d0b" />
+  <title>Fluffless — remove the fluff</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Background atmosphere: three blurred radial glows (decorative) -->
+  <div class="glow-layer" aria-hidden="true">
+    <div class="glow glow-1"></div>
+    <div class="glow glow-2"></div>
+    <div class="glow glow-3"></div>
+  </div>
+
+  <main class="app-shell">
+    <!-- Masthead -->
+    <header class="masthead">
+      <div class="masthead-row">
+        <p class="eyebrow">Local-first media trimmer</p>
+        <button class="theme-toggle" id="themeToggle" role="switch" aria-checked="false"
+                aria-label="Toggle light and dark theme">
+          <span class="knob"></span>
+          <svg class="ic-moon" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg class="ic-sun" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        </button>
+      </div>
+      <h1 class="page-title">Fluff<span class="accent-i">less</span></h1>
+      <p class="lede">Point it at a folder of media. It finds the repeated stretches —
+        the ads, the intros, the outros — and lets you cut them out.</p>
+    </header>
+
+    <!-- Library picker -->
+    <section class="section" id="librarySection">
+      <div class="section-head">
+        <span class="marker">Library.</span>
+        <h2 class="section-title">Where your media lives</h2>
+      </div>
+      <div class="panel">
+        <div class="field-row">
+          <input class="input mono" id="libraryInput" type="text" spellcheck="false"
+                 placeholder="/path/to/your/media  ·  a folder of show folders" />
+          <button class="btn-primary" id="openBtn"><span class="btn-label">Open</span></button>
+        </div>
+        <div class="engine-row" id="engineRow"></div>
+        <p class="hint"><em>Engines.</em> <span class="mono">fpcalc</span> fingerprints audio,
+          <span class="mono">ffmpeg</span> reads, previews, and trims. Nothing leaves this machine.</p>
+      </div>
+    </section>
+
+    <!-- Folders grid -->
+    <section class="section hidden" id="foldersSection">
+      <div class="section-head">
+        <span class="marker">Shelf.</span>
+        <h2 class="section-title">Your media</h2>
+      </div>
+      <div class="card-grid" id="foldersGrid"></div>
+    </section>
+
+    <!-- Folder workspace -->
+    <section class="section hidden" id="workspaceSection">
+      <button class="btn-back" id="backBtn">← All media</button>
+
+      <div class="section-head">
+        <span class="marker" id="wsMarker">Folder.</span>
+        <h2 class="section-title" id="wsTitle"></h2>
+      </div>
+
+      <!-- Scan controls -->
+      <div class="panel">
+        <div class="control-head">
+          <span class="field-label">Scan scope</span>
+          <div class="segmented" id="scopeSeg">
+            <button data-scope="all" class="active">All files</button>
+            <button data-scope="partial">Selected</button>
+          </div>
+        </div>
+        <div class="file-list" id="fileList"></div>
+        <div class="control-foot">
+          <p class="hint" id="scanHint"><em>Scan.</em> Fingerprints each file, finds segments
+            that recur across the set, and matches anything already catalogued.</p>
+          <button class="btn-primary" id="scanBtn"><span class="btn-label">Scan media</span></button>
+        </div>
+        <div class="progress indeterminate hidden" id="scanProgress"><div class="bar"></div></div>
+      </div>
+
+      <!-- Duplicates / patterns -->
+      <div class="subsection">
+        <div class="section-head">
+          <span class="marker">Duplicates.</span>
+          <h3 class="section-subtitle">Recurring segments found</h3>
+        </div>
+        <div id="patternsList"></div>
+      </div>
+
+      <!-- Remove the fluff -->
+      <div class="panel remove-panel" id="removePanel">
+        <div class="section-head">
+          <span class="marker">Trim.</span>
+          <h3 class="section-subtitle">Remove the fluff</h3>
+        </div>
+        <p class="hint">Choose which catalogued segments to cut. The originals are never
+          touched — trimmed copies land in <span class="mono">_fluffless_out</span>.</p>
+        <div class="check-grid" id="removeLabels"></div>
+        <div class="control-foot">
+          <span class="meta-note" id="removeSummary"></span>
+          <button class="btn-danger" id="removeBtn">Remove the fluff</button>
+        </div>
+        <div id="removeResults"></div>
+      </div>
+    </section>
+
+    <!-- Footer: export + processed -->
+    <footer class="footer hidden" id="footer">
+      <div class="section-head">
+        <span class="marker">Database.</span>
+        <h2 class="section-title">Catalogue &amp; history</h2>
+      </div>
+      <div class="panel">
+        <div class="export-row">
+          <span class="field-label">Export the database</span>
+          <div class="btn-group">
+            <button class="btn-ghost" id="exportJson">JSON</button>
+            <button class="btn-ghost" id="exportMd">Markdown</button>
+          </div>
+        </div>
+        <div id="processedList"></div>
+      </div>
+      <p class="footer-note"><em>Privacy.</em> Everything is stored on-device in
+        <span class="mono">.fluffless/fluffless.db</span>. No telemetry, no uploads.</p>
+    </footer>
+  </main>
+
+  <!-- Transient toast -->
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
