@@ -57,3 +57,40 @@ def test_preview_error_is_descriptive():
             assert "preview" in str(exc).lower()
         else:
             raise AssertionError("expected a failure for a missing source")
+
+
+def _has_encoder(tools, name: str) -> bool:
+    out = subprocess.run([tools.ffmpeg, "-v", "error", "-encoders"],
+                         capture_output=True, text=True).stdout
+    return name in out
+
+
+def test_preview_audio_with_embedded_cover_art():
+    """An MP3/M4A with embedded album art must still preview (the cover-art
+    video stream is dropped, not forced into an incompatible container)."""
+    tools = detect_tools()
+    if not tools.has_ffmpeg or not _has_encoder(tools, "libmp3lame"):
+        return
+    with tempfile.TemporaryDirectory() as d:
+        audio = os.path.join(d, "a.mp3")
+        cover = os.path.join(d, "cover.png")
+        song = os.path.join(d, "song.mp3")
+        subprocess.run([tools.ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+                        "-i", "sine=frequency=440:duration=4", "-c:a", "libmp3lame", audio],
+                       check=True, capture_output=True)
+        subprocess.run([tools.ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+                        "-i", "color=c=red:size=120x120:duration=1", "-frames:v", "1", cover],
+                       check=True, capture_output=True)
+        subprocess.run([tools.ffmpeg, "-v", "error", "-y", "-i", audio, "-i", cover,
+                        "-map", "0:a", "-map", "1:v", "-c", "copy",
+                        "-disposition:v:0", "attached_pic", song],
+                       check=True, capture_output=True)
+
+        out = clips.extract_preview(song, 0.5, 2.5, os.path.join(d, "prev"), tools, "audio")
+        assert os.path.exists(out) and os.path.getsize(out) > 0
+        # The preview must carry audio and no leftover cover-art video stream.
+        probe = subprocess.run(
+            [tools.ffprobe, "-v", "error", "-show_entries", "stream=codec_type",
+             "-of", "csv=p=0", out], capture_output=True, text=True).stdout
+        assert "audio" in probe and "video" not in probe
+
