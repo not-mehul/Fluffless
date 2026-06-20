@@ -179,6 +179,13 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, message: str, status: int = 400) -> None:
         self._json({"error": message}, status)
 
+    def _safe_error(self, message: str, status: int = 500) -> None:
+        """Report an error, but never raise if the socket is already gone."""
+        try:
+            self._error(message, status)
+        except (ConnectionError, OSError):
+            pass
+
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if not length:
@@ -220,10 +227,10 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 return self._serve_preview(int(m.group(1)))
             return self._error("not found", 404)
-        except BrokenPipeError:
-            pass
+        except ConnectionError:
+            pass  # client hung up (incl. Windows WinError 10053) — nothing to send
         except Exception as exc:  # noqa: BLE001
-            self._error(f"{type(exc).__name__}: {exc}", 500)
+            self._safe_error(f"{type(exc).__name__}: {exc}")
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -240,8 +247,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/preview":
                 return self._api_make_preview()
             return self._error("not found", 404)
+        except ConnectionError:
+            pass
         except Exception as exc:  # noqa: BLE001
-            self._error(f"{type(exc).__name__}: {exc}", 500)
+            self._safe_error(f"{type(exc).__name__}: {exc}")
 
     def do_DELETE(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -375,8 +384,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 if ev.get("stage") == "end":
                     break
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (ConnectionError, OSError):
+            pass  # client closed the stream (refresh, navigate, WinError 10053)
 
     # --- API: patterns & labels ----------------------------------------------
 
@@ -570,7 +579,7 @@ class Handler(BaseHTTPRequestHandler):
                 break
             try:
                 self.wfile.write(chunk)
-            except (BrokenPipeError, ConnectionResetError):
+            except (ConnectionError, OSError):
                 break
             remaining -= len(chunk)
 
