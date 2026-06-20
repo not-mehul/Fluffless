@@ -299,6 +299,10 @@
       endScanUI("error", ev.message || "Scan failed");
       return;
     }
+    if (ev.stage === "warn") {
+      if (ev.message) console.warn(ev.message);   // surfaced as a summary at the end
+      return;
+    }
     if (typeof ev.percent === "number") setScanPercent(ev.percent);
     if (STAGE_WORDS[ev.stage]) $("scanStage").textContent = STAGE_WORDS[ev.stage];
     if (ev.detail || ev.message) setScanFile(ev.detail || ev.message);
@@ -311,7 +315,12 @@
       endScanUI("complete");
       const found = (ev.new_patterns || []).length;
       const matched = (ev.matched_patterns || []).length;
-      toast(`Scanned ${ev.files_scanned} file(s) · ${found} new · ${matched} matched`, "notice");
+      const failed = ev.previews_failed || 0;
+      if (failed) {
+        toast(`Scanned ${ev.files_scanned} file(s) · ${failed} preview${failed === 1 ? "" : "s"} couldn't be built — use “Generate preview” to retry`, "error");
+      } else {
+        toast(`Scanned ${ev.files_scanned} file(s) · ${found} new · ${matched} matched`, "notice");
+      }
     }
   }
 
@@ -423,20 +432,47 @@
     el.querySelectorAll(".preview-btn").forEach((b) => {
       b.addEventListener("click", () => playClip(b, p));
     });
+    el.querySelectorAll(".gen-btn").forEach((b) => {
+      b.addEventListener("click", () => generatePreview(b));
+    });
     return el;
   }
 
   function renderClip(c) {
     const range = `${fmtDur(c.start)}–${fmtDur(c.end)}`;
-    const preview = c.has_preview
+    const action = c.has_preview
       ? `<button class="preview-btn" data-clip="${c.id}">▸ Preview</button>`
-      : `<span class="clip-info">no preview</span>`;
+      : `<button class="preview-btn gen-btn" data-clip="${c.id}">Generate preview</button>`;
     return `
       <div class="clip" data-clip="${c.id}">
         <span class="clip-info"><span class="cfile">${escapeHtml(c.file_name)}</span> · ${range}</span>
-        ${preview}
+        ${action}
         <div class="clip-media" data-media="${c.id}"></div>
       </div>`;
+  }
+
+  async function generatePreview(btn) {
+    const clipId = btn.dataset.clip;
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Generating…";
+    try {
+      await post("/api/preview", { clip_id: Number(clipId) });
+      // Mark the clip as having a preview and turn this into a Play button.
+      state.patterns.forEach((p) => p.clips.forEach((c) => {
+        if (c.id === Number(clipId)) c.has_preview = true;
+      }));
+      btn.classList.remove("gen-btn");
+      btn.disabled = false;
+      btn.textContent = "▸ Preview";
+      btn.replaceWith(btn.cloneNode(true)); // drop old listener
+      const fresh = document.querySelector(`.preview-btn[data-clip="${clipId}"]`);
+      if (fresh) fresh.addEventListener("click", () => playClip(fresh, null));
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = prev;
+      toast(e.message, "error");
+    }
   }
 
   function playClip(btn, pattern) {

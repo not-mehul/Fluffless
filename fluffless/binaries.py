@@ -7,6 +7,7 @@ Nothing here is AI — these are the real tools doing the work.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -56,11 +57,16 @@ def detect_tools() -> Tools:
 
 
 def run(cmd: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess:
-    """Run a command, capturing output. Raises CalledProcessError on failure."""
-    return subprocess.run(
-        cmd,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    """Run a command, capturing output. Raises RuntimeError with the tool's own
+    stderr on failure, so the real reason (missing encoder, bad codec, …) is
+    visible instead of an opaque exit code."""
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        tool = os.path.basename(cmd[0]) if cmd else "command"
+        detail = (proc.stderr or proc.stdout or "").strip()
+        tail = detail.splitlines()[-4:] if detail else []
+        raise RuntimeError(
+            f"{tool} failed (exit {proc.returncode})"
+            + (": " + " | ".join(tail) if tail else "")
+        )
+    return proc
