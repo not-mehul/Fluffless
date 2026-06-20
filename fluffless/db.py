@@ -34,9 +34,11 @@ CREATE TABLE IF NOT EXISTS patterns (
     label       TEXT NOT NULL DEFAULT 'Other',
     bits        INTEGER NOT NULL,
     item_sec    REAL NOT NULL,
-    items       TEXT NOT NULL,          -- JSON array of fingerprint integers
+    items       TEXT NOT NULL,          -- JSON array of fingerprint integers (original)
     duration    REAL NOT NULL,
     shows       INTEGER NOT NULL DEFAULT 1,
+    head_items  INTEGER NOT NULL DEFAULT 0,  -- items trimmed off the front (refinement)
+    tail_items  INTEGER NOT NULL DEFAULT 0,  -- items trimmed off the end (refinement)
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -48,6 +50,8 @@ CREATE TABLE IF NOT EXISTS clips (
     file_name   TEXT NOT NULL,
     start       REAL NOT NULL,
     end         REAL NOT NULL,
+    orig_start  REAL,                   -- detected bounds, never edited (for refinement)
+    orig_end    REAL,
     preview     TEXT,                   -- path to extracted preview clip
     created_at  REAL NOT NULL
 );
@@ -82,8 +86,28 @@ class Database:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
+        cls._migrate(conn)
         conn.commit()
         return cls(path=path, conn=conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Bring an existing database up to the current schema in place, so a
+        user's catalogue survives upgrades without a re-scan."""
+        def cols(table: str) -> set[str]:
+            return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+        ccols = cols("clips")
+        if "orig_start" not in ccols:
+            conn.execute("ALTER TABLE clips ADD COLUMN orig_start REAL")
+            conn.execute("ALTER TABLE clips ADD COLUMN orig_end REAL")
+            # Backfill: existing clips' current bounds are their detected bounds.
+            conn.execute("UPDATE clips SET orig_start = start, orig_end = end "
+                         "WHERE orig_start IS NULL")
+        pcols = cols("patterns")
+        if "head_items" not in pcols:
+            conn.execute("ALTER TABLE patterns ADD COLUMN head_items INTEGER NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE patterns ADD COLUMN tail_items INTEGER NOT NULL DEFAULT 0")
 
     @property
     def workspace(self) -> str:
@@ -137,7 +161,17 @@ class Database:
         ).fetchone()
 
     def pattern_items(self, row: sqlite3.Row) -> list[int]:
-        return json.loads(row["items"])
+        """The *effective* fingerprint used for matching: the original items
+        with any refinement (head/tail trim) applied. Tightening a pattern
+        therefore tightens what future scans locate, with no re-detection."""
+        items = json.loads(row["items"])
+        head = row["head_items"] if "head_items" in row.keys() else 0
+        tail = row["tail_items"] if "tail_items" in row.keys() else 0
+        if head or tail:
+            end = len(items) - tail
+            if end > head:
+                return items[head:end]
+        return items
 
     # --- clips ---------------------------------------------------------------
 
@@ -147,8 +181,9 @@ class Database:
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO clips (pattern_id, file_path, file_name, start, end, "
-            "preview, created_at) VALUES (?,?,?,?,?,?,?)",
-            (pattern_id, file_path, os.path.basename(file_path), start, end, preview, _now()),
+            "orig_start, orig_end, preview, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (pattern_id, file_path, os.path.basename(file_path), start, end,
+             start, end, preview, _now()),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -164,6 +199,80 @@ class Database:
     def set_clip_preview(self, clip_id: int, preview: str) -> None:
         self.conn.execute("UPDATE clips SET preview = ? WHERE id = ?", (preview, clip_id))
         self.conn.commit()
+
+    def update_clip_bounds(self, clip_id: int, start: float, end: float) -> None:
+        """Set a clip's exact start/end and clear its (now stale) preview."""
+        self.conn.execute(
+            "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
+            (start, end, clip_id),
+        )
+        self.conn.commit()
+
+    def trim_pattern(self, pattern_id: int, head: float, tail: float) -> int | None:
+        """Set a pattern's refinement to ``head``/``tail`` seconds: tighten the
+        stored fingerprint (so future scans locate just this, not the
+        surrounding content) and move every clip's bounds to its *original*
+        detected start/end shifted inward by the same amounts.
+
+        This is **absolute and idempotent** — applying the same trim twice is a
+        no-op, and it is the operation behind both the manual trim panel and
+        "apply one refined clip to all" (see :meth:`propagate_from_clip`).
+        Returns the number of clips adjusted, or None if the pattern is unknown.
+        """
+        row = self.pattern(pattern_id)
+        if row is None:
+            return None
+        head = max(0.0, head)
+        tail = max(0.0, tail)
+        item_sec = row["item_sec"] or 0.1238
+        n_items = len(json.loads(row["items"]))
+        h = min(round(head / item_sec), n_items - 1)
+        t = min(round(tail / item_sec), max(0, n_items - 1 - h))
+        new_dur = max(item_sec, (n_items - h - t) * item_sec)
+        self.conn.execute(
+            "UPDATE patterns SET head_items = ?, tail_items = ?, duration = ?, "
+            "updated_at = ? WHERE id = ?",
+            (h, t, new_dur, _now(), pattern_id),
+        )
+        n = 0
+        for c in self.clips(pattern_id):
+            os_, oe = self._orig_bounds(c)
+            ns = os_ + head
+            ne = oe - tail
+            if ne - ns < 0.2:                     # never collapse a clip to nothing
+                ne = ns + 0.2
+            self.conn.execute(
+                "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
+                (ns, ne, c["id"]),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def propagate_from_clip(self, clip_id: int) -> tuple[int, float, float] | None:
+        """Take one hand-refined clip as the reference and apply its correction
+        to **every** clip of the same pattern: the head/tail it trimmed off its
+        detected bounds become the pattern's refinement. Returns
+        (clips_adjusted, head_seconds, tail_seconds), or None if unknown.
+
+        This is the "I fixed one, fix the other 100 the same way" operation.
+        """
+        ref = self.clip(clip_id)
+        if ref is None:
+            return None
+        os_, oe = self._orig_bounds(ref)
+        head = max(0.0, ref["start"] - os_)
+        tail = max(0.0, oe - ref["end"])
+        n = self.trim_pattern(ref["pattern_id"], head, tail)
+        return (n or 0, head, tail)
+
+    @staticmethod
+    def _orig_bounds(clip: sqlite3.Row) -> tuple[float, float]:
+        """A clip's detected bounds, falling back to current bounds for rows
+        created before the orig columns existed."""
+        os_ = clip["orig_start"] if clip["orig_start"] is not None else clip["start"]
+        oe = clip["orig_end"] if clip["orig_end"] is not None else clip["end"]
+        return os_, oe
 
     def clips(self, pattern_id: int | None = None) -> list[sqlite3.Row]:
         if pattern_id is None:

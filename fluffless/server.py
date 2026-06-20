@@ -109,6 +109,10 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
     endpoint and the scan-job result event."""
     out = []
     for row in db.patterns(folder):
+        keys = row.keys()
+        item_sec = row["item_sec"] or 0.1238
+        head_items = row["head_items"] if "head_items" in keys else 0
+        tail_items = row["tail_items"] if "tail_items" in keys else 0
         clips = [
             {
                 "id": c["id"],
@@ -116,6 +120,8 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
                 "file_path": c["file_path"],
                 "start": round(c["start"], 2),
                 "end": round(c["end"], 2),
+                "edited": abs((c["start"] or 0) - (c["orig_start"] if c["orig_start"] is not None else c["start"])) > 0.05
+                          or abs((c["end"] or 0) - (c["orig_end"] if c["orig_end"] is not None else c["end"])) > 0.05,
                 "has_preview": bool(c["preview"]),
             }
             for c in db.clips(row["id"])
@@ -127,6 +133,8 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
             "duration": round(row["duration"], 2),
             "shows": row["shows"],
             "bits": row["bits"],
+            "head_trim": round(head_items * item_sec, 2),
+            "tail_trim": round(tail_items * item_sec, 2),
             "clips": clips,
         })
     return out
@@ -263,6 +271,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_remove()
             if path == "/api/preview":
                 return self._api_make_preview()
+            if path == "/api/clip/adjust":
+                return self._api_clip_adjust()
+            if path == "/api/clip/propagate":
+                return self._api_clip_propagate()
+            if path == "/api/pattern/adjust":
+                return self._api_pattern_adjust()
             return self._error("not found", 404)
         except ConnectionError:
             pass
@@ -502,6 +516,117 @@ class Handler(BaseHTTPRequestHandler):
         rel = os.path.relpath(out, st.preview_dir())
         st.db.set_clip_preview(clip["id"], rel)
         self._json({"ok": True, "clip_id": clip["id"]})
+
+    def _api_clip_adjust(self) -> None:
+        """Set one clip's exact start/end and rebuild its preview, so the user
+        can fine-tune a single occurrence and hear the result immediately."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        clip = st.db.clip(int(body.get("clip_id")))
+        if not clip:
+            return self._error("unknown clip", 404)
+        try:
+            start = max(0.0, float(body.get("start")))
+            end = float(body.get("end"))
+        except (TypeError, ValueError):
+            return self._error("start and end must be numbers")
+        if end - start < 0.2:
+            return self._error("end must be at least 0.2s after start")
+        st.db.update_clip_bounds(clip["id"], start, end)
+
+        preview_ok, message = self._rebuild_preview(clip["id"])
+        self._json({
+            "ok": True,
+            "clip_id": clip["id"],
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "has_preview": preview_ok,
+            "preview_error": None if preview_ok else message,
+        })
+
+    def _api_clip_propagate(self) -> None:
+        """Apply one refined clip's correction to every clip of its pattern.
+
+        Optionally sets the reference clip's bounds first (so the user can
+        refine and propagate in one action), then shifts all clips to their
+        detected bounds trimmed by the same head/tail — and tightens the
+        fingerprint so future scans match just as tightly."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        clip = st.db.clip(int(body.get("clip_id")))
+        if not clip:
+            return self._error("unknown clip", 404)
+
+        if body.get("start") is not None and body.get("end") is not None:
+            try:
+                start = max(0.0, float(body["start"]))
+                end = float(body["end"])
+            except (TypeError, ValueError):
+                return self._error("start and end must be numbers")
+            if end - start < 0.2:
+                return self._error("end must be at least 0.2s after start")
+            st.db.update_clip_bounds(clip["id"], start, end)
+
+        result = st.db.propagate_from_clip(clip["id"])
+        if result is None:
+            return self._error("unknown clip", 404)
+        n, head, tail = result
+        pattern = st.db.pattern(clip["pattern_id"])
+        self._json({
+            "ok": True,
+            "clips_adjusted": n,
+            "head": round(head, 2),
+            "tail": round(tail, 2),
+            "patterns": patterns_payload(st.db, pattern["folder"] if pattern else None),
+        })
+
+    def _api_pattern_adjust(self) -> None:
+        """Trim head/tail seconds off every clip of a pattern (and the stored
+        fingerprint), then return the refreshed folder patterns."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        row = st.db.pattern(int(body.get("pattern_id")))
+        if not row:
+            return self._error("unknown pattern", 404)
+        try:
+            head = float(body.get("head", 0) or 0)
+            tail = float(body.get("tail", 0) or 0)
+        except (TypeError, ValueError):
+            return self._error("head and tail must be numbers")
+        if head < 0 or tail < 0:
+            return self._error("trim amounts must be 0 or more")
+        if head == 0 and tail == 0:
+            return self._error("nothing to trim")
+        n = st.db.trim_pattern(row["id"], head, tail)
+        self._json({
+            "ok": True,
+            "clips_adjusted": n,
+            "patterns": patterns_payload(st.db, row["folder"]),
+        })
+
+    def _rebuild_preview(self, clip_id: int) -> tuple[bool, str | None]:
+        """Regenerate a clip's preview after its bounds change. Returns
+        (ok, error_message)."""
+        st = self.state
+        if not st.tools.has_ffmpeg:
+            return False, "ffmpeg is not installed"
+        clip = st.db.clip(clip_id)
+        if not clip or not os.path.isfile(clip["file_path"]):
+            return False, "source file is missing"
+        try:
+            out = extract_preview(
+                clip["file_path"], clip["start"], clip["end"], st.preview_dir(), st.tools,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        st.db.set_clip_preview(clip["id"], os.path.relpath(out, st.preview_dir()))
+        return True, None
 
     # --- API: processed & export ---------------------------------------------
 
