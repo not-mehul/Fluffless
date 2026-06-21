@@ -36,17 +36,12 @@
   const ICON_VIDEO = '<path d="m22 8-6 4 6 4V8z"/><rect x="2" y="6" width="14" height="12" rx="2"/>';
   const ICON_EMPTY = '<path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/>';
   // Lucide glyphs (MIT) — one source of truth so every icon shares size & stroke.
-  const ICON_BACK     = '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>';
-  const ICON_CHEVRON  = '<path d="m6 9 6 6 6-6"/>';
-  const ICON_FOLDER   = '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/>';
   const ICON_SCAN     = '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/>';
-  const ICON_SCISSORS = '<circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/>';
   const ICON_TRASH    = '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
   const ICON_PLAY     = '<polygon points="6 3 20 12 6 21 6 3"/>';
   const ICON_PENCIL   = '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>';
   const ICON_CHECK    = '<path d="M20 6 9 17l-5-5"/>';
   const ICON_X        = '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>';
-  const ICON_DB       = '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>';
 
   // ---------- api ----------
   async function api(path, opts) {
@@ -75,8 +70,6 @@
     library: null,
     folders: [],
     folder: null,        // active folder object
-    scope: "all",
-    selectedFiles: new Set(),
     filesCollapsed: false,
     processedNames: new Set(),
     patterns: [],
@@ -168,15 +161,11 @@
     const folder = state.folders.find((f) => f.name === name);
     if (!folder) return;
     state.folder = folder;
-    state.scope = "all";
-    state.selectedFiles = new Set(folder.files.map((f) => f.path));
     state.filesCollapsed = folder.files.length > COLLAPSE_THRESHOLD;
     $("foldersSection").classList.add("hidden");
     showWorkspace(true);
     $("wsTitle").textContent = folder.name;
     $("wsMarker").textContent = folder.kind === "video" ? "Video." : "Audio.";
-    document.querySelectorAll("#scopeSeg button").forEach((b) =>
-      b.classList.toggle("active", b.dataset.scope === "all"));
     renderFileList();
     await Promise.all([loadPatterns(), refreshProcessed()]);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -194,64 +183,26 @@
 
   $("backBtn").addEventListener("click", () => { state.folder = null; renderFolders(); window.scrollTo({ top: 0 }); });
 
-  // scope toggle
-  document.querySelectorAll("#scopeSeg button").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.scope = btn.dataset.scope;
-      document.querySelectorAll("#scopeSeg button").forEach((b) =>
-        b.classList.toggle("active", b === btn));
-      if (state.scope === "partial") state.filesCollapsed = false; // reveal to pick
-      renderFileList();
-    });
-  });
-
-  // file-list controls
+  // file-list toggle (read-only list; scanning always covers the whole folder)
   $("filesToggle").addEventListener("click", () => {
     state.filesCollapsed = !state.filesCollapsed;
     applyFilesCollapsed();
   });
-  $("selectAll").addEventListener("click", () => {
-    state.selectedFiles = new Set(state.folder.files.map((f) => f.path));
-    renderFileList();
-  });
-  $("selectNone").addEventListener("click", () => {
-    state.selectedFiles = new Set();
-    renderFileList();
-  });
 
   function renderFileList() {
     const list = $("fileList");
-    const partial = state.scope === "partial";
-    $("filesTools").classList.toggle("hidden", !partial);
     $("filesCount").textContent = String(state.folder.files.length);
     list.innerHTML = "";
     state.folder.files.forEach((f) => {
       const done = state.processedNames && state.processedNames.has(f.name);
-      const row = document.createElement(partial ? "label" : "div");
-      row.className = "file-row" + (partial ? " check pick" : "") + (done ? " processed" : "");
-      const checked = state.selectedFiles.has(f.path);
+      const row = document.createElement("div");
+      row.className = "file-row" + (done ? " processed" : "");
       row.innerHTML = `
-        ${partial ? `<input type="checkbox" ${checked ? "checked" : ""}/>
-          <span class="box">${icon('<path d="m5 12 5 5L20 7"/>', 12)}</span>` : ""}
         <span class="fname">${escapeHtml(f.name)}</span>
         <span class="fmeta">${f.kind} · ${fmtDur(f.duration)} · ${fmtSize(f.size)}</span>`;
-      if (partial) {
-        const cb = row.querySelector("input");
-        cb.addEventListener("change", () => {
-          if (cb.checked) state.selectedFiles.add(f.path);
-          else state.selectedFiles.delete(f.path);
-          updateSelCount();
-        });
-      }
       list.appendChild(row);
     });
-    updateSelCount();
     applyFilesCollapsed();
-  }
-
-  function updateSelCount() {
-    if (state.scope !== "partial" || !state.folder) return;
-    $("selCount").textContent = `${state.selectedFiles.size} of ${state.folder.files.length}`;
   }
 
   // ---------- scan ----------
@@ -261,17 +212,12 @@
   async function runScan() {
     const folder = state.folder;
     if (!folder) return;
-    let files = null;
-    if (state.scope === "partial") {
-      files = [...state.selectedFiles];
-      if (!files.length) { toast("Select at least one file", "error"); return; }
-    }
     const btn = $("scanBtn");
     btn.disabled = true;
     startScanUI();
     const minLen = Math.max(1, parseFloat($("minLen").value) || 25);
     try {
-      const res = await post("/api/scan", { folder: folder.name, files, min_seconds: minLen });
+      const res = await post("/api/scan", { folder: folder.name, files: null, min_seconds: minLen });
       setScanFile(`${res.total_files} file${res.total_files === 1 ? "" : "s"} queued`);
       openScanStream();
     } catch (e) {
@@ -428,9 +374,8 @@
           <span class="status-verb">${STATUS_VERB[p.status] || STATUS_VERB.pending}</span>
           <span class="pattern-chips">
             <span class="chip-mono">${fmtDur(p.duration)}</span>
-            <span class="chip-mono">${p.shows} show${p.shows === 1 ? "" : "s"}</span>
             <span class="chip-mono">${p.clips.length} occurrence${p.clips.length === 1 ? "" : "s"}</span>
-            ${(p.pinned || p.head_trim || p.tail_trim) ? `<span class="chip-mono custom" title="This segment's saved fingerprint was set by hand">custom</span>` : ""}
+            ${p.pinned ? `<span class="chip-mono custom" title="This segment's fingerprint was cropped by hand">cropped</span>` : ""}
           </span>
         </div>
         <div class="pattern-controls">
@@ -440,17 +385,8 @@
             <button class="review-btn no ${p.status === "dismissed" ? "active" : ""}" data-decision="not_ad"
               title="Not an ad — set it aside">${icon(ICON_X, 14)}<span>Not an ad</span></button>
           </div>
-          <button class="icon-btn trim-btn" title="Trim boundaries" aria-label="Trim boundaries">${icon(ICON_SCISSORS, 15)}</button>
           <button class="icon-btn danger pattern-del" title="Delete segment" aria-label="Delete segment">${icon(ICON_TRASH, 15)}</button>
         </div>
-      </div>
-      <div class="trim-panel hidden">
-        <span class="trim-label">Trim every clip —</span>
-        <label class="trim-field">start <input type="number" class="num-input trim-head" min="0" step="0.5" value="${p.head_trim || 0}"/>s</label>
-        <label class="trim-field">end <input type="number" class="num-input trim-tail" min="0" step="0.5" value="${p.tail_trim || 0}"/>s</label>
-        <button class="btn-ghost trim-apply">Apply to all ${p.clips.length}</button>
-        <button class="btn-ghost trim-reset">Reset to default</button>
-        <span class="trim-hint">Seconds to trim off the detected start &amp; end of every clip — also tightens future detection. <em>Reset to default</em> restores the detected fingerprint and every clip's original bounds.</span>
       </div>
       <div class="clip-list">${clips}</div>`;
 
@@ -458,13 +394,6 @@
       b.addEventListener("click", () => reviewPattern(p, b.dataset.decision));
     });
     el.querySelector(".pattern-del").addEventListener("click", () => deletePattern(p.id));
-    el.querySelector(".trim-btn").addEventListener("click", () => {
-      const panel = el.querySelector(".trim-panel");
-      panel.classList.toggle("hidden");
-      el.querySelector(".trim-btn").classList.toggle("active", !panel.classList.contains("hidden"));
-    });
-    el.querySelector(".trim-apply").addEventListener("click", () => applyPatternTrim(p, el));
-    el.querySelector(".trim-reset").addEventListener("click", () => resetPattern(p, el));
     el.querySelectorAll(".preview-btn").forEach((b) => {
       const clip = p.clips.find((c) => c.id === Number(b.dataset.clip));
       b.addEventListener("click", () => playClip(b, clip));
@@ -489,37 +418,6 @@
       </div>`;
   }
 
-  async function applyPatternTrim(p, el) {
-    const head = parseFloat(el.querySelector(".trim-head").value) || 0;
-    const tail = parseFloat(el.querySelector(".trim-tail").value) || 0;
-    if (head <= 0 && tail <= 0) { toast("Enter a start or end trim amount", "error"); return; }
-    const btn = el.querySelector(".trim-apply");
-    btn.disabled = true;
-    try {
-      const res = await post("/api/pattern/adjust", { pattern_id: p.id, head, tail });
-      state.patterns = res.patterns || state.patterns;
-      renderPatterns();
-      toast(`Trimmed ${res.clips_adjusted} clip(s) — regenerate previews to verify`, "notice");
-    } catch (e) {
-      toast(e.message, "error");
-      btn.disabled = false;
-    }
-  }
-
-  async function resetPattern(p, el) {
-    const btn = el.querySelector(".trim-reset");
-    btn.disabled = true; btn.textContent = "Resetting…";
-    try {
-      const res = await post("/api/pattern/reset", { pattern_id: p.id });
-      state.patterns = res.patterns || state.patterns;
-      renderPatterns();
-      toast("Segment reset to detected defaults", "notice");
-    } catch (e) {
-      toast(e.message, "error");
-      btn.disabled = false; btn.textContent = "Reset to default";
-    }
-  }
-
   function toggleClipEditor(btn, c, p) {
     const clipEl = btn.closest(".clip");
     const slot = clipEl.querySelector(".clip-media");
@@ -528,67 +426,27 @@
       btn.classList.remove("active");
       return;
     }
-    const n = p.clips.length;
-    const otherPatterns = state.patterns.filter((op) => op.id !== p.id);
-    const moveOpts = otherPatterns.map((op) =>
-      `<option value="${op.id}">${STATUS_VERB[op.status] || "Segment"} · ${fmtDur(op.duration)} · ${op.shows} show${op.shows === 1 ? "" : "s"}</option>`
-    ).join("");
-
     slot.innerHTML = `
       <div class="clip-edit">
         <div class="edit-fields">
           <label>start <input type="number" class="num-input edit-start" step="0.1" min="0" value="${c.start}"/>s</label>
           <label>end <input type="number" class="num-input edit-end" step="0.1" min="0" value="${c.end}"/>s</label>
           <button class="btn-ghost save-bounds">Save &amp; preview</button>
-          ${n > 1 ? `<button class="btn-ghost apply-all">Apply to all ${n}</button>` : ""}
+          <button class="btn-ghost clip-reset-btn">Reset</button>
         </div>
         <div class="edit-actions">
-          <button class="btn-ghost clip-reset-btn">Reset to detected</button>
-          <button class="btn-ghost clip-fp-btn" title="Save this clip's adjusted region as the pattern's fingerprint — future scans will match exactly this span">Use as fingerprint</button>
-          <button class="btn-ghost clip-relocate-btn" title="Find this exact segment across every scanned file: bring matching episodes into this group at the same length, and split clips that don't match into their own group">Match across all</button>
-          <select class="clip-move-sel">
-            <option value="">Move to group…</option>
-            ${moveOpts}
-            <option value="new">↳ New group from this clip</option>
-          </select>
+          <button class="btn-primary clip-relocate-btn" title="Find this exact segment across every scanned file: bring matching episodes into this group at the same length, and split clips that don't match into their own group">${icon(ICON_SCAN, 14)}<span class="btn-label">Match across all</span></button>
         </div>
-        ${n > 1 ? `<p class="edit-hint"><em>Apply to all.</em> Trim every clip of this pattern by the same amount you trimmed here — and tighten future detection to match.</p>` : ""}
+        <p class="edit-hint"><em>Match across all.</em> Crop this clip to the exact ad, then
+          match it everywhere — every episode that contains it joins this group at the same
+          length, and clips that don't match move to their own group.</p>
         <div class="edit-player"></div>
       </div>`;
     slot.dataset.editor = "1";
     btn.classList.add("active");
     slot.querySelector(".save-bounds").addEventListener("click", () => saveClipBounds(clipEl, c, slot));
-    const applyBtn = slot.querySelector(".apply-all");
-    if (applyBtn) applyBtn.addEventListener("click", () => applyClipToAll(c, p, slot));
     slot.querySelector(".clip-reset-btn").addEventListener("click", () => resetClip(c, slot, clipEl));
-    slot.querySelector(".clip-fp-btn").addEventListener("click", () => setFingerprintFromClip(c, slot));
     slot.querySelector(".clip-relocate-btn").addEventListener("click", () => relocateFromClip(c, slot));
-    slot.querySelector(".clip-move-sel").addEventListener("change", (e) => {
-      const val = e.target.value;
-      if (!val) return;
-      e.target.value = "";
-      moveClip(c, p, val);
-    });
-  }
-
-  async function applyClipToAll(c, p, slot) {
-    const start = parseFloat(slot.querySelector(".edit-start").value);
-    const end = parseFloat(slot.querySelector(".edit-end").value);
-    if (!(end - start >= 0.2)) { toast("End must be at least 0.2s after start", "error"); return; }
-    const btn = slot.querySelector(".apply-all");
-    btn.disabled = true; btn.textContent = "Applying…";
-    try {
-      const res = await post("/api/clip/propagate", { clip_id: c.id, start, end });
-      state.patterns = res.patterns || state.patterns;
-      renderPatterns();
-      const trim = [];
-      if (res.head) trim.push(`${res.head}s off the start`);
-      if (res.tail) trim.push(`${res.tail}s off the end`);
-      toast(`Trimmed ${trim.join(" and ") || "boundaries"} on all ${res.clips_adjusted} clip(s)`, "notice");
-    } catch (e) {
-      toast(e.message, "error");
-      btn.disabled = false; btn.textContent = `Apply to all ${p.clips.length}`;
-    }
   }
 
   async function saveClipBounds(clipEl, c, slot) {
@@ -644,23 +502,6 @@
     }
   }
 
-  async function setFingerprintFromClip(c, slot) {
-    const start = parseFloat(slot.querySelector(".edit-start").value);
-    const end = parseFloat(slot.querySelector(".edit-end").value);
-    if (!(end - start >= 0.2)) { toast("End must be at least 0.2s after start", "error"); return; }
-    const fpBtn = slot.querySelector(".clip-fp-btn");
-    fpBtn.disabled = true; fpBtn.textContent = "Saving…";
-    try {
-      const res = await post("/api/pattern/fingerprint", { clip_id: c.id, start, end });
-      state.patterns = res.patterns || state.patterns;
-      renderPatterns();
-      toast(`Fingerprint saved — ${fmtDur(res.duration)} region locked for future detection`, "notice");
-    } catch (e) {
-      toast(e.message, "error");
-      fpBtn.disabled = false; fpBtn.textContent = "Use as fingerprint";
-    }
-  }
-
   // "I found the ad — find it everywhere." Crops the clip (if edited), pins it
   // as the group's fingerprint, then re-derives the whole group: matches snap to
   // the same length, new matching episodes are pulled in, and non-matches split
@@ -670,7 +511,8 @@
     const end = parseFloat(slot.querySelector(".edit-end").value);
     if (!(end - start >= 0.2)) { toast("End must be at least 0.2s after start", "error"); return; }
     const btn = slot.querySelector(".clip-relocate-btn");
-    btn.disabled = true; btn.textContent = "Matching…";
+    const label = btn.querySelector(".btn-label");
+    btn.disabled = true; if (label) label.textContent = "Matching…";
     try {
       const res = await post("/api/clip/relocate", { clip_id: c.id, start, end });
       state.patterns = res.patterns || state.patterns;
@@ -678,20 +520,12 @@
       const parts = [`${res.snapped + res.added} clip(s) at ${fmtDur(res.duration)}`];
       if (res.added) parts.push(`${res.added} new`);
       if (res.moved_out) parts.push(`${res.moved_out} moved to a new group`);
+      if (res.deduped) parts.push(`${res.deduped} nested duplicate(s) cleaned up`);
       toast(`Matched across files — ${parts.join(", ")}`, "notice");
     } catch (e) {
       toast(e.message, "error");
-      btn.disabled = false; btn.textContent = "Match across all";
+      btn.disabled = false; if (label) label.textContent = "Match across all";
     }
-  }
-
-  async function moveClip(c, p, targetId) {
-    try {
-      const res = await post("/api/clip/move", { clip_id: c.id, target_pattern_id: targetId });
-      state.patterns = res.patterns || state.patterns;
-      renderPatterns();
-      toast(targetId === "new" ? "Split into a new segment" : "Occurrence moved", "notice");
-    } catch (e) { toast(e.message, "error"); }
   }
 
   async function playClip(btn, c) {
@@ -731,6 +565,7 @@
         const parts = [];
         if (res.applied_to) parts.push(`found ${res.applied_to} occurrence${res.applied_to === 1 ? "" : "s"} across your files`);
         if (res.absorbed) parts.push(`dismissed ${res.absorbed} overlapping card${res.absorbed === 1 ? "" : "s"}`);
+        if (res.deduped) parts.push(`cleaned up ${res.deduped} nested duplicate${res.deduped === 1 ? "" : "s"}`);
         toast(parts.length ? `Confirmed — ${parts.join(", ")}` : "Confirmed as an ad — will be removed", "notice");
       } else if (res.status === "dismissed") {
         toast("Set aside — won't be removed", "notice");

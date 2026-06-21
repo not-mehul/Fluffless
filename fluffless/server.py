@@ -28,6 +28,7 @@ from .repetition import DetectParams
 from .scan import (
     absorb_overlapping_pending,
     apply_pattern_to_stored,
+    dedupe_contained_clips,
     relocate_group_from_clip,
     scan_folder,
 )
@@ -132,9 +133,6 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
     out = []
     for row in db.patterns(folder):
         keys = row.keys()
-        item_sec = row["item_sec"] or 0.1238
-        head_items = row["head_items"] if "head_items" in keys else 0
-        tail_items = row["tail_items"] if "tail_items" in keys else 0
         clips = [
             {
                 "id": c["id"],
@@ -155,8 +153,6 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
             "duration": round(row["duration"], 2),
             "shows": row["shows"],
             "bits": row["bits"],
-            "head_trim": round(head_items * item_sec, 2),
-            "tail_trim": round(tail_items * item_sec, 2),
             "pinned": bool(row["pinned"]) if "pinned" in keys else False,
             "clips": clips,
         })
@@ -301,20 +297,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_make_preview()
             if path == "/api/clip/adjust":
                 return self._api_clip_adjust()
-            if path == "/api/clip/propagate":
-                return self._api_clip_propagate()
             if path == "/api/clip/relocate":
                 return self._api_clip_relocate()
             if path == "/api/clip/reset":
                 return self._api_clip_reset()
-            if path == "/api/clip/move":
-                return self._api_clip_move()
-            if path == "/api/pattern/adjust":
-                return self._api_pattern_adjust()
-            if path == "/api/pattern/reset":
-                return self._api_pattern_reset()
-            if path == "/api/pattern/fingerprint":
-                return self._api_pattern_fingerprint()
             return self._error("not found", 404)
         except ConnectionError:
             pass
@@ -493,14 +479,19 @@ class Handler(BaseHTTPRequestHandler):
         # airings that pre-dated the confirmation. Only on confirm.
         applied = 0
         absorbed = 0
+        deduped = 0
         if status == "confirmed":
             applied = apply_pattern_to_stored(st.db, int(pid))
             absorbed = len(absorb_overlapping_pending(st.db, int(pid)))
+            # Drop nested duplicates this confirmation may have completed (e.g. a
+            # back-to-back block now fully covered by its atomic ads).
+            deduped, _ = dedupe_contained_clips(st.db, row["folder"])
         self._json({
             "ok": True,
             "status": status,
             "applied_to": applied,
             "absorbed": absorbed,
+            "deduped": deduped,
             "patterns": patterns_payload(st.db, row["folder"]),
         })
 
@@ -566,7 +557,20 @@ class Handler(BaseHTTPRequestHandler):
             kind = mf.kind if mf else None
             ranges = sorted((s, e) for s, e in segs)
             out = remove_segments(fpath, ranges, duration, out_dir, st.tools, kind)
-            saved = sum(e - s for s, e in ranges)
+            # Sum the *merged* ranges — nested/overlapping clips (the same ad in
+            # several groups) would otherwise inflate the saved total, since the
+            # actual cut only removes each second once.
+            saved = 0.0
+            cur_s = cur_e = None
+            for s, e in ranges:
+                if cur_e is None or s > cur_e:
+                    if cur_e is not None:
+                        saved += cur_e - cur_s
+                    cur_s, cur_e = s, e
+                else:
+                    cur_e = max(cur_e, e)
+            if cur_e is not None:
+                saved += cur_e - cur_s
             return out, saved
 
         results: list[dict] = []
@@ -662,44 +666,6 @@ class Handler(BaseHTTPRequestHandler):
             "preview_error": None if preview_ok else message,
         })
 
-    def _api_clip_propagate(self) -> None:
-        """Apply one refined clip's correction to every clip of its pattern.
-
-        Optionally sets the reference clip's bounds first (so the user can
-        refine and propagate in one action), then shifts all clips to their
-        detected bounds trimmed by the same head/tail — and tightens the
-        fingerprint so future scans match just as tightly."""
-        st = self.state
-        if not st.db:
-            return self._error("open a library first")
-        body = self._body()
-        clip = st.db.clip(int(body.get("clip_id")))
-        if not clip:
-            return self._error("unknown clip", 404)
-
-        if body.get("start") is not None and body.get("end") is not None:
-            try:
-                start = max(0.0, float(body["start"]))
-                end = float(body["end"])
-            except (TypeError, ValueError):
-                return self._error("start and end must be numbers")
-            if end - start < 0.2:
-                return self._error("end must be at least 0.2s after start")
-            st.db.update_clip_bounds(clip["id"], start, end)
-
-        result = st.db.propagate_from_clip(clip["id"])
-        if result is None:
-            return self._error("unknown clip", 404)
-        n, head, tail = result
-        pattern = st.db.pattern(clip["pattern_id"])
-        self._json({
-            "ok": True,
-            "clips_adjusted": n,
-            "head": round(head, 2),
-            "tail": round(tail, 2),
-            "patterns": patterns_payload(st.db, pattern["folder"] if pattern else None),
-        })
-
     def _api_clip_relocate(self) -> None:
         """Find one clip's cropped segment across the whole folder and re-derive
         its group from it: snap every match to the same length, pull in episodes
@@ -712,6 +678,7 @@ class Handler(BaseHTTPRequestHandler):
         clip = st.db.clip(int(body.get("clip_id")))
         if not clip:
             return self._error("unknown clip", 404)
+        split_nonmatches = False
         if body.get("start") is not None and body.get("end") is not None:
             try:
                 start = max(0.0, float(body["start"]))
@@ -720,96 +687,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error("start and end must be numbers")
             if end - start < 0.2:
                 return self._error("end must be at least 0.2s after start")
+            # Only split non-matches when the user actually cropped the clip —
+            # i.e. meaningfully different from the detected bounds. Without an
+            # explicit crop the operation is pure discovery: snap + pull in,
+            # never evict an existing clip.
+            orig_s = clip["orig_start"] if clip["orig_start"] is not None else clip["start"]
+            orig_e = clip["orig_end"] if clip["orig_end"] is not None else clip["end"]
+            if abs(start - orig_s) > 1.0 or abs(end - orig_e) > 1.0:
+                split_nonmatches = True
             st.db.update_clip_bounds(clip["id"], start, end)
             self._rebuild_preview(clip["id"])
-        res = relocate_group_from_clip(st.db, clip["id"])
+        res = relocate_group_from_clip(st.db, clip["id"], split_nonmatches=split_nonmatches)
         if res is None:
             return self._error("unknown clip", 404)
         if "error" in res:
             return self._error(res["error"])
+        # Collapse any now-redundant nested clips (the same audio captured by a
+        # larger enclosing group) so duplicates don't pile up across groups.
+        deduped, _ = dedupe_contained_clips(st.db, res["folder"])
         self._json({
             "ok": True,
             "snapped": res["snapped"],
             "added": res["added"],
             "moved_out": res["moved_out"],
+            "deduped": deduped,
             "duration": round(res["duration"], 2),
             "patterns": patterns_payload(st.db, res["folder"]),
-        })
-
-    def _api_pattern_adjust(self) -> None:
-        """Trim head/tail seconds off every clip of a pattern (and the stored
-        fingerprint), then return the refreshed folder patterns."""
-        st = self.state
-        if not st.db:
-            return self._error("open a library first")
-        body = self._body()
-        row = st.db.pattern(int(body.get("pattern_id")))
-        if not row:
-            return self._error("unknown pattern", 404)
-        try:
-            head = float(body.get("head", 0) or 0)
-            tail = float(body.get("tail", 0) or 0)
-        except (TypeError, ValueError):
-            return self._error("head and tail must be numbers")
-        if head < 0 or tail < 0:
-            return self._error("trim amounts must be 0 or more")
-        if head == 0 and tail == 0:
-            return self._error("nothing to trim")
-        n = st.db.trim_pattern(row["id"], head, tail)
-        self._json({
-            "ok": True,
-            "clips_adjusted": n,
-            "patterns": patterns_payload(st.db, row["folder"]),
-        })
-
-    def _api_pattern_fingerprint(self) -> None:
-        """Adopt one clip's (possibly hand-cropped) region as the pattern's saved
-        fingerprint, so future scans match just that — not the surrounding
-        content. Optionally crops the clip first, in one action."""
-        st = self.state
-        if not st.db:
-            return self._error("open a library first")
-        body = self._body()
-        clip = st.db.clip(int(body.get("clip_id")))
-        if not clip:
-            return self._error("unknown clip", 404)
-        if body.get("start") is not None and body.get("end") is not None:
-            try:
-                start = max(0.0, float(body["start"]))
-                end = float(body["end"])
-            except (TypeError, ValueError):
-                return self._error("start and end must be numbers")
-            if end - start < 0.2:
-                return self._error("end must be at least 0.2s after start")
-            st.db.update_clip_bounds(clip["id"], start, end)
-            self._rebuild_preview(clip["id"])
-        res = st.db.set_fingerprint_from_clip(clip["id"])
-        if res is None:
-            return self._error("unknown clip", 404)
-        if "error" in res:
-            return self._error(res["error"])
-        pattern = st.db.pattern(clip["pattern_id"])
-        self._json({
-            "ok": True,
-            "duration": round(res["duration"], 2),
-            "patterns": patterns_payload(st.db, pattern["folder"] if pattern else None),
-        })
-
-    def _api_pattern_reset(self) -> None:
-        """Reset a pattern to its detected default: baseline fingerprint, no
-        head/tail trim, and every clip back to its detected bounds."""
-        st = self.state
-        if not st.db:
-            return self._error("open a library first")
-        body = self._body()
-        row = st.db.pattern(int(body.get("pattern_id")))
-        if not row:
-            return self._error("unknown pattern", 404)
-        n = st.db.reset_pattern(row["id"])
-        self._json({
-            "ok": True,
-            "clips_reset": n or 0,
-            "patterns": patterns_payload(st.db, row["folder"]),
         })
 
     def _api_clip_reset(self) -> None:
@@ -833,38 +736,6 @@ class Handler(BaseHTTPRequestHandler):
             "end": round(end, 2),
             "has_preview": preview_ok,
             "preview_error": None if preview_ok else message,
-        })
-
-    def _api_clip_move(self) -> None:
-        """Move one clip to another group, or split it into a new one — for
-        correcting a mis-grouping. With ``target_pattern_id`` it reassigns;
-        without one (or "new") it creates a fresh group from the clip."""
-        st = self.state
-        if not st.db:
-            return self._error("open a library first")
-        body = self._body()
-        clip = st.db.clip(int(body.get("clip_id")))
-        if not clip:
-            return self._error("unknown clip", 404)
-        target = body.get("target_pattern_id")
-        if target in (None, "", "new"):
-            res = st.db.new_group_from_clip(clip["id"], status="pending")
-        else:
-            src = st.db.pattern(clip["pattern_id"])
-            tgt = st.db.pattern(int(target))
-            if not tgt:
-                return self._error("unknown target group", 404)
-            if src and tgt["folder"] != src["folder"]:
-                return self._error("can only move within the same folder")
-            res = st.db.move_clip(clip["id"], int(target))
-        if res is None:
-            return self._error("unknown clip", 404)
-        if "error" in res:
-            return self._error(res["error"])
-        self._json({
-            "ok": True,
-            "result": res,
-            "patterns": patterns_payload(st.db, res.get("folder")),
         })
 
     def _rebuild_preview(self, clip_id: int) -> tuple[bool, str | None]:
