@@ -35,6 +35,18 @@
   const ICON_AUDIO = '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>';
   const ICON_VIDEO = '<path d="m22 8-6 4 6 4V8z"/><rect x="2" y="6" width="14" height="12" rx="2"/>';
   const ICON_EMPTY = '<path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/>';
+  // Lucide glyphs (MIT) — one source of truth so every icon shares size & stroke.
+  const ICON_BACK     = '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>';
+  const ICON_CHEVRON  = '<path d="m6 9 6 6 6-6"/>';
+  const ICON_FOLDER   = '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/>';
+  const ICON_SCAN     = '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/>';
+  const ICON_SCISSORS = '<circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/>';
+  const ICON_TRASH    = '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
+  const ICON_PLAY     = '<polygon points="6 3 20 12 6 21 6 3"/>';
+  const ICON_PENCIL   = '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>';
+  const ICON_CHECK    = '<path d="M20 6 9 17l-5-5"/>';
+  const ICON_X        = '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>';
+  const ICON_DB       = '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>';
 
   // ---------- api ----------
   async function api(path, opts) {
@@ -421,8 +433,8 @@
         </div>
         <div class="pattern-controls">
           <div class="pattern-labels">${labelBtns}</div>
-          <button class="pattern-mini trim-btn" title="Trim boundaries">Trim</button>
-          <button class="pattern-del" title="Delete pattern">Del</button>
+          <button class="icon-btn trim-btn" title="Trim boundaries" aria-label="Trim boundaries">${icon(ICON_SCISSORS, 15)}</button>
+          <button class="icon-btn danger pattern-del" title="Delete pattern" aria-label="Delete pattern">${icon(ICON_TRASH, 15)}</button>
         </div>
       </div>
       <div class="trim-panel hidden">
@@ -461,8 +473,8 @@
       <div class="clip" data-clip="${c.id}">
         <span class="clip-info"><span class="cfile">${escapeHtml(c.file_name)}</span> · <span class="crange">${range}</span></span>
         <div class="clip-actions">
-          <button class="preview-btn" data-clip="${c.id}">▸ Preview</button>
-          <button class="adjust-btn" data-clip="${c.id}" title="Adjust this clip's boundaries">✎</button>
+          <button class="preview-btn" data-clip="${c.id}">${icon(ICON_PLAY, 12)}<span class="pv-label">Preview</span></button>
+          <button class="icon-btn adjust-btn" data-clip="${c.id}" title="Adjust this clip's boundaries" aria-label="Adjust this clip's boundaries">${icon(ICON_PENCIL, 14)}</button>
         </div>
         <div class="clip-media" data-media="${c.id}"></div>
       </div>`;
@@ -569,23 +581,24 @@
 
   async function playClip(btn, c) {
     const slot = btn.closest(".clip").querySelector(".clip-media");
+    const setLabel = (ico, txt) => { btn.innerHTML = `${icon(ico, 12)}<span class="pv-label">${txt}</span>`; };
     if (slot.dataset.loaded) {
-      slot.innerHTML = ""; delete slot.dataset.loaded; btn.textContent = "▸ Preview"; return;
+      slot.innerHTML = ""; delete slot.dataset.loaded; setLabel(ICON_PLAY, "Preview"); return;
     }
     if (c && !c.has_preview) {                 // build it on first play — no separate button
-      btn.disabled = true; btn.textContent = "Generating…";
+      btn.disabled = true; btn.innerHTML = `<span class="pv-spin"></span><span class="pv-label">Generating</span>`;
       try {
         await post("/api/preview", { clip_id: c.id });
         c.has_preview = true; updateClipInState(c.id, c.start, c.end, true);
       } catch (e) {
-        toast(e.message, "error"); btn.disabled = false; btn.textContent = "▸ Preview"; return;
+        toast(e.message, "error"); btn.disabled = false; setLabel(ICON_PLAY, "Preview"); return;
       }
       btn.disabled = false;
     }
     const tag = state.folder && state.folder.kind === "video" ? "video" : "audio";
     slot.innerHTML = `<${tag} controls autoplay src="/api/preview/${c.id}?t=${Date.now()}"></${tag}>`;
     slot.dataset.loaded = "1";
-    btn.textContent = "▾ Hide";
+    setLabel(ICON_X, "Hide");
   }
 
   async function setLabel(p, label, el) {
@@ -655,18 +668,23 @@
 
   let removeConfirm = false;
   let removeConfirmTimer = null;
+  const setRemoveLabel = (txt) => {
+    const lbl = $("removeBtn").querySelector(".btn-label");
+    if (lbl) lbl.textContent = txt; else $("removeBtn").textContent = txt;
+  };
   $("removeBtn").addEventListener("click", () => {
     const btn = $("removeBtn");
     if (!removeConfirm) {
       removeConfirm = true;
-      btn.textContent = "Tap again to confirm";
+      btn.classList.add("confirm");
+      setRemoveLabel("Tap again to confirm");
       removeConfirmTimer = setTimeout(() => {
-        removeConfirm = false; btn.textContent = "Remove the fluff";
+        removeConfirm = false; btn.classList.remove("confirm"); setRemoveLabel("Remove the fluff");
       }, 3000);
       return;
     }
     clearTimeout(removeConfirmTimer);
-    removeConfirm = false; btn.textContent = "Remove the fluff";
+    removeConfirm = false; btn.classList.remove("confirm"); setRemoveLabel("Remove the fluff");
     runRemove();
   });
 
@@ -762,8 +780,8 @@
     const div = document.createElement("div");
     div.className = "remove-result";
     div.innerHTML = r.error
-      ? `<span class="err">✕ ${escapeHtml(r.file)}</span><span>${escapeHtml(r.error)}</span>`
-      : `<span class="ok">✓ ${escapeHtml(r.file)}</span><span>saved ${fmtDur(r.saved_sec)} · ${r.segments} cut → ${escapeHtml(r.output)}</span>`;
+      ? `<span class="err">${icon(ICON_X, 12)} ${escapeHtml(r.file)}</span><span>${escapeHtml(r.error)}</span>`
+      : `<span class="ok">${icon(ICON_CHECK, 12)} ${escapeHtml(r.file)}</span><span>saved ${fmtDur(r.saved_sec)} · ${r.segments} cut → ${escapeHtml(r.output)}</span>`;
     wrap.appendChild(div);
   }
 

@@ -201,6 +201,7 @@ body { transition: background 0.3s; }
 .input.mono { font-family: var(--mono); font-size: 0.8rem; }
 
 .btn-primary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
   background: var(--accent-bright); color: var(--on-accent);
   border: none; border-radius: 2px; cursor: pointer;
   text-transform: uppercase; letter-spacing: 0.15em; font-weight: 500;
@@ -208,6 +209,7 @@ body { transition: background 0.3s; }
   box-shadow: 0 0 32px rgba(var(--accent-amber-rgb), 0.25);
   transition: background 0.15s, box-shadow 0.15s;
 }
+.btn-primary svg { flex: none; }
 .btn-primary:hover { background: var(--accent-bright-hover); box-shadow: 0 0 48px rgba(var(--accent-amber-rgb), 0.35); }
 .btn-primary:disabled { background: var(--disabled-bg); color: var(--text-faint); box-shadow: none; cursor: not-allowed; }
 
@@ -220,20 +222,27 @@ body { transition: background 0.3s; }
 .btn-ghost:hover { color: var(--text-heading); background: var(--hover-bg); }
 
 .btn-danger {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
   background: transparent; border: 1px solid var(--danger); color: var(--danger);
   border-radius: 2px; cursor: pointer; font-family: var(--sans);
   text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.75rem; font-weight: 500;
   padding: 0.6rem 1.1rem; transition: background 0.15s, color 0.15s;
 }
+.btn-danger svg { flex: none; }
 .btn-danger:hover { background: var(--danger); color: var(--on-accent); }
 .btn-danger:disabled { border-color: var(--border); color: var(--text-faint); cursor: not-allowed; background: transparent; }
+.btn-danger.confirm { background: var(--danger); color: var(--on-accent); }
 
 .btn-back {
+  display: inline-flex; align-items: center; gap: 0.45rem;
   background: none; border: none; color: var(--text-dim); cursor: pointer;
   font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em;
   text-transform: uppercase; padding: 0; margin-bottom: 1.5rem;
+  transition: color 0.15s;
 }
+.btn-back svg { flex: none; transition: transform 0.15s; }
 .btn-back:hover { color: var(--accent-amber); }
+.btn-back:hover svg { transform: translateX(-2px); }
 .btn-group { display: flex; gap: 0.5rem; }
 
 /* ---------- 6. Theme toggle ---------- */
@@ -310,7 +319,7 @@ body { transition: background 0.3s; }
   gap: 1rem; margin-bottom: 0.6rem; min-height: 1.5rem; }
 .files-toggle { display: flex; align-items: center; gap: 0.55rem; background: none;
   border: none; cursor: pointer; padding: 0; }
-.files-toggle .chev { color: var(--text-dim); font-size: 0.7rem; transition: transform 0.2s; line-height: 1; }
+.files-toggle .chev { color: var(--text-dim); transition: transform 0.2s; display: block; }
 .files.collapsed .files-toggle .chev { transform: rotate(-90deg); }
 .files-toggle:hover .field-label { color: var(--text-heading); }
 .count-chip { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.06em;
@@ -444,18 +453,28 @@ body { transition: background 0.3s; }
 .clip-media { grid-column: 1 / -1; }
 .clip-media audio, .clip-media video { width: 100%; border-radius: 2px; }
 .clip-media video { max-height: 220px; background: #000; }
-.preview-btn { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em;
+.preview-btn { display: inline-flex; align-items: center; gap: 0.4rem;
+  font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--accent-amber); background: none; border: 1px solid var(--border);
-  border-radius: 2px; padding: 0.3rem 0.6rem; cursor: pointer; }
-.preview-btn:hover { color: var(--text-heading); background: var(--hover-bg); }
+  border-radius: 2px; padding: 0.3rem 0.6rem; cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s; }
+.preview-btn svg { display: block; flex: none; }
+.preview-btn:hover { color: var(--text-heading); border-color: var(--text-dim); background: var(--hover-bg); }
+.preview-btn:disabled { color: var(--text-faint); cursor: progress; }
+.pv-spin { width: 11px; height: 11px; flex: none; border: 1.5px solid var(--accent-amber);
+  border-top-color: transparent; border-radius: 50%; animation: spin 0.75s linear infinite; }
 
-.pattern-controls { display: flex; gap: 0.5rem; align-items: center; }
-.pattern-mini, .pattern-del { background: none; border: 1px solid var(--border); color: var(--text-dim);
-  border-radius: 2px; padding: 0.35rem 0.6rem; cursor: pointer; font-family: var(--mono); font-size: 0.6rem;
-  letter-spacing: 0.1em; text-transform: uppercase; transition: color 0.15s, border-color 0.15s, background 0.15s; }
-.pattern-mini:hover { border-color: var(--accent-amber); color: var(--accent-amber); background: var(--hover-bg); }
-.pattern-mini.active { border-color: var(--accent-amber); color: var(--accent-amber); }
-.pattern-del:hover { border-color: var(--danger); color: var(--danger); background: var(--error-bg); }
+.pattern-controls { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+
+/* Row-action icon buttons (§8.10) — bordered, with a danger variant */
+.icon-btn { display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 2px; padding: 0.38rem 0.45rem; cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s; }
+.icon-btn svg { display: block; }
+.icon-btn:hover, .icon-btn.active { color: var(--accent-amber); border-color: var(--accent-amber); background: var(--hover-bg); }
+.icon-btn.danger:hover { color: var(--danger); border-color: var(--danger); background: var(--error-bg); }
+.icon-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* Pattern-level trim panel + per-clip boundary editor */
 .trim-panel { display: flex; align-items: center; gap: 0.75rem 1rem; flex-wrap: wrap;
@@ -472,10 +491,6 @@ body { transition: background 0.3s; }
 .num-input:focus { outline: none; border-color: var(--text-dim); }
 
 .clip-actions { display: flex; gap: 0.4rem; align-items: center; }
-.adjust-btn { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 2px;
-  padding: 0.3rem 0.5rem; cursor: pointer; font-family: var(--mono); font-size: 0.72rem; line-height: 1;
-  transition: color 0.15s, border-color 0.15s; }
-.adjust-btn:hover, .adjust-btn.active { color: var(--accent-amber); border-color: var(--accent-amber); }
 
 .clip-edit { display: flex; flex-direction: column; gap: 0.65rem; padding: 0.5rem 0 0.2rem; }
 .edit-fields { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
@@ -491,7 +506,9 @@ body { transition: background 0.3s; }
 .check-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 0.6rem; margin: 1rem 0; }
 .remove-result { font-family: var(--mono); font-size: 0.7rem; color: var(--text-dim);
-  border-top: 1px solid var(--border-faint); padding: 0.5rem 0; display: flex; gap: 0.6rem; align-items: baseline; }
+  border-top: 1px solid var(--border-faint); padding: 0.5rem 0; display: flex; gap: 0.6rem; align-items: center; }
+.remove-result .ok, .remove-result .err { display: inline-flex; align-items: center; gap: 0.35rem; flex: none; }
+.remove-result .ok svg, .remove-result .err svg { flex: none; }
 .remove-result .ok { color: var(--accent-sage); }
 .remove-result .err { color: var(--danger); }
 
