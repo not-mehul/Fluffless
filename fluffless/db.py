@@ -495,6 +495,10 @@ class Database:
     def clip(self, clip_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
 
+    def delete_clip(self, clip_id: int) -> None:
+        self.conn.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
+        self.conn.commit()
+
     # --- processed -----------------------------------------------------------
 
     def add_processed(

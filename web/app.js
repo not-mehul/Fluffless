@@ -678,6 +678,7 @@
       const parts = [`${res.snapped + res.added} clip(s) at ${fmtDur(res.duration)}`];
       if (res.added) parts.push(`${res.added} new`);
       if (res.moved_out) parts.push(`${res.moved_out} moved to a new group`);
+      if (res.deduped) parts.push(`${res.deduped} nested duplicate(s) cleaned up`);
       toast(`Matched across files — ${parts.join(", ")}`, "notice");
     } catch (e) {
       toast(e.message, "error");
@@ -731,6 +732,7 @@
         const parts = [];
         if (res.applied_to) parts.push(`found ${res.applied_to} occurrence${res.applied_to === 1 ? "" : "s"} across your files`);
         if (res.absorbed) parts.push(`dismissed ${res.absorbed} overlapping card${res.absorbed === 1 ? "" : "s"}`);
+        if (res.deduped) parts.push(`cleaned up ${res.deduped} nested duplicate${res.deduped === 1 ? "" : "s"}`);
         toast(parts.length ? `Confirmed — ${parts.join(", ")}` : "Confirmed as an ad — will be removed", "notice");
       } else if (res.status === "dismissed") {
         toast("Set aside — won't be removed", "notice");

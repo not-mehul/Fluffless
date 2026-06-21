@@ -300,6 +300,67 @@ def relocate_group_from_clip(
     }
 
 
+def _covered(intervals: list[tuple[float, float]], s: float, e: float, tol: float) -> bool:
+    """True when [s, e] has no gap larger than ``tol`` left uncovered by the
+    union of ``intervals`` (each a (start, end) pair)."""
+    cursor = s
+    for cs, ce in sorted(intervals):
+        if ce <= cursor:
+            continue
+        if cs > cursor + tol:          # an uncovered gap wider than tolerance
+            return False
+        cursor = max(cursor, ce)
+        if cursor >= e - tol:
+            return True
+    return cursor >= e - tol
+
+
+def dedupe_contained_clips(
+    db: Database, folder: str, tol: float = 1.5,
+) -> tuple[int, list[int]]:
+    """Collapse nested detections to their finest pieces.
+
+    When the same audio is captured at two granularities — e.g. two ads detected
+    individually *and* as one back-to-back block — the larger block is redundant.
+    This drops any clip whose span is fully covered (no gap wider than ``tol``
+    seconds) by the union of strictly-smaller clips **of the same review status**
+    in the same file, keeping the atomic pieces. Groups left with no clips are
+    deleted, so the group count falls as duplicates are resolved.
+
+    Restricting coverage to the same status preserves removal output: a confirmed
+    clip is only ever dropped when smaller *confirmed* clips already cut the same
+    seconds. Returns (clips_removed, deleted_pattern_ids).
+    """
+    status_by_pat = {prow["id"]: prow["status"] for prow in db.patterns(folder)}
+    by_key: dict[tuple[str, str], list] = {}
+    for c in db.clips():
+        status = status_by_pat.get(c["pattern_id"])
+        if status is None:                       # clip in another folder
+            continue
+        by_key.setdefault((c["file_path"], status), []).append(c)
+
+    to_delete: list[int] = []
+    affected: set[int] = set()
+    for clips in by_key.values():
+        clips.sort(key=lambda c: c["end"] - c["start"], reverse=True)  # largest first
+        survivors = list(clips)
+        for c in clips:
+            cdur = c["end"] - c["start"]
+            smaller = [
+                (o["start"], o["end"]) for o in survivors
+                if o["id"] != c["id"] and (o["end"] - o["start"]) < cdur - 1e-6
+            ]
+            if _covered(smaller, c["start"], c["end"], tol):
+                to_delete.append(c["id"])
+                affected.add(c["pattern_id"])
+                survivors = [o for o in survivors if o["id"] != c["id"]]
+
+    for cid in to_delete:
+        db.delete_clip(cid)
+    deleted_patterns = [pid for pid in affected if db.recount_shows(pid) == 0]
+    return len(to_delete), deleted_patterns
+
+
 def absorb_overlapping_pending(
     db: Database,
     confirmed_pattern_id: int,

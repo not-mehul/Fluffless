@@ -28,6 +28,7 @@ from .repetition import DetectParams
 from .scan import (
     absorb_overlapping_pending,
     apply_pattern_to_stored,
+    dedupe_contained_clips,
     relocate_group_from_clip,
     scan_folder,
 )
@@ -493,14 +494,19 @@ class Handler(BaseHTTPRequestHandler):
         # airings that pre-dated the confirmation. Only on confirm.
         applied = 0
         absorbed = 0
+        deduped = 0
         if status == "confirmed":
             applied = apply_pattern_to_stored(st.db, int(pid))
             absorbed = len(absorb_overlapping_pending(st.db, int(pid)))
+            # Drop nested duplicates this confirmation may have completed (e.g. a
+            # back-to-back block now fully covered by its atomic ads).
+            deduped, _ = dedupe_contained_clips(st.db, row["folder"])
         self._json({
             "ok": True,
             "status": status,
             "applied_to": applied,
             "absorbed": absorbed,
+            "deduped": deduped,
             "patterns": patterns_payload(st.db, row["folder"]),
         })
 
@@ -566,7 +572,20 @@ class Handler(BaseHTTPRequestHandler):
             kind = mf.kind if mf else None
             ranges = sorted((s, e) for s, e in segs)
             out = remove_segments(fpath, ranges, duration, out_dir, st.tools, kind)
-            saved = sum(e - s for s, e in ranges)
+            # Sum the *merged* ranges — nested/overlapping clips (the same ad in
+            # several groups) would otherwise inflate the saved total, since the
+            # actual cut only removes each second once.
+            saved = 0.0
+            cur_s = cur_e = None
+            for s, e in ranges:
+                if cur_e is None or s > cur_e:
+                    if cur_e is not None:
+                        saved += cur_e - cur_s
+                    cur_s, cur_e = s, e
+                else:
+                    cur_e = max(cur_e, e)
+            if cur_e is not None:
+                saved += cur_e - cur_s
             return out, saved
 
         results: list[dict] = []
@@ -736,11 +755,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._error("unknown clip", 404)
         if "error" in res:
             return self._error(res["error"])
+        # Collapse any now-redundant nested clips (the same audio captured by a
+        # larger enclosing group) so duplicates don't pile up across groups.
+        deduped, _ = dedupe_contained_clips(st.db, res["folder"])
         self._json({
             "ok": True,
             "snapped": res["snapped"],
             "added": res["added"],
             "moved_out": res["moved_out"],
+            "deduped": deduped,
             "duration": round(res["duration"], 2),
             "patterns": patterns_payload(st.db, res["folder"]),
         })
