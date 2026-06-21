@@ -127,6 +127,22 @@ def test_video_params_scale_bit_error():
     assert v.key_mask == 0xFFFF000000000000
 
 
+def test_parallel_detection_matches_serial():
+    p = DetectParams(min_seconds=5.0)
+    shared = _rng_items(60, 11)
+    fps = []
+    for k in range(8):                         # >= PARALLEL_MIN_FILES, so the
+        head = _rng_items(10 * (k + 1), 100 + k)   # workers=2 run takes the
+        body = _rng_items(300, 500 + k)            # process-pool path
+        items = head + _flip_bits(shared, 2, 200 + k) + body
+        fps.append(Fingerprint(items=items, item_sec=0.1238, bits=32))
+    serial = recurring_segments(fps, p, workers=1)
+    parallel = recurring_segments(fps, p, workers=2)
+    norm = lambda S: [[(round(a, 2), round(b, 2)) for a, b in x] for x in S]
+    assert norm(serial) == norm(parallel)
+    assert any(serial)                          # actually found the shared run
+
+
 def test_video_width_matching():
     p = DetectParams().scaled(64)
     shared = [random.Random(i).getrandbits(64) for i in range(40)]

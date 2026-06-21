@@ -26,13 +26,19 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=7654, help="bind port (default 7654)")
+    parser.add_argument(
+        "--workers", type=int, default=0,
+        help="parallel workers for fingerprinting & detection "
+             "(default: number of CPU cores; 1 disables parallelism)",
+    )
     args = parser.parse_args()
 
     library = args.library
     if library is None and os.path.isdir(DEFAULT_LIBRARY):
         library = DEFAULT_LIBRARY
 
-    serve(library, host=args.host, port=args.port)
+    workers = args.workers if args.workers and args.workers > 0 else (os.cpu_count() or 1)
+    serve(library, host=args.host, port=args.port, workers=workers)
 
 
 if __name__ == "__main__":

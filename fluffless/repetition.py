@@ -15,12 +15,17 @@ from __future__ import annotations
 
 from array import array
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
 # Verification reaches this many items beyond the outermost voting position, to
 # catch a segment's edges where items Hamming-match but didn't seed cleanly.
 SEG_MARGIN = 48
+
+# Below this many files, the cost of spinning up worker processes outweighs the
+# parallel speed-up, so detection stays single-process regardless of --workers.
+PARALLEL_MIN_FILES = 6
 
 
 @dataclass(frozen=True)
@@ -261,102 +266,216 @@ def _merge(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
 
 # --- §5 + §6  Cross-file recurrence → per-file timestamped segments ----------
 
+def _pair_runs(
+    ai, lai: int, bj, lbj: int, index_j: dict[int, list[int]],
+    mlen: int, mgap: int, p: DetectParams,
+) -> tuple[set[int], set[int]] | None:
+    """For one file pair, the positions where the two share a *dense,
+    minimum-length run* — returned as (positions-in-A, positions-in-B), or None.
+
+    This per-pair density guard is what stops coincidental matches from
+    accumulating into phantom segments at a scale of hundreds of files. Shared
+    by the serial and parallel detection paths so they stay identical.
+    """
+    offsets = _ranged_offsets(ai, index_j, p)
+    if not offsets:
+        return None
+    mask = p.mask
+    max_bit_err = p.max_bit_err
+    min_density = p.min_density
+    runs_i: set[int] = set()
+    runs_j: set[int] = set()
+    for off, vlo, vhi in offsets:
+        # Verify only a window around the voting positions — the shared segment
+        # lives there — instead of walking the whole file.
+        lo = vlo - SEG_MARGIN
+        if lo < 0:
+            lo = 0
+        if off < 0 and lo < -off:
+            lo = -off
+        hi = vhi + 1 + SEG_MARGIN
+        if hi > lai:
+            hi = lai
+        if hi > lbj - off:
+            hi = lbj - off
+        if hi - lo < mlen:
+            continue
+        seg = bytearray(hi - lo)
+        ipos = lo
+        while ipos < hi:
+            if ((ai[ipos] ^ bj[ipos + off]) & mask).bit_count() <= max_bit_err:
+                seg[ipos - lo] = 1
+            ipos += 1
+        for rs, re in _runs(seg, mlen, mgap, min_density):
+            for pos in range(lo + rs, lo + re):
+                runs_i.add(pos)
+                runs_j.add(pos + off)
+    return (runs_i, runs_j) if runs_i else None
+
+
+def _extract(count: "array | dict[int, int]", L: int, threshold: int,
+             mlen: int, mgap: int, min_density: float, item_sec: float
+             ) -> list[tuple[float, float]]:
+    """Turn per-position recurrence counts into merged second-ranges."""
+    recurring = bytearray(L)
+    if isinstance(count, dict):
+        for pos, c in count.items():
+            if c >= threshold:
+                recurring[pos] = 1
+    else:
+        for pos, c in enumerate(count):
+            if c >= threshold:
+                recurring[pos] = 1
+    runs = _runs(recurring, mlen, mgap, min_density)
+    return _merge([(s * item_sec, e * item_sec) for s, e in runs])
+
+
 def recurring_segments(
     fingerprints: Sequence[Fingerprint],
     p: DetectParams,
     on_progress: "Callable[[int, int], None] | None" = None,
+    workers: int = 1,
 ) -> list[list[tuple[float, float]]]:
     """For each input file, the list of (start, end) second-ranges that recur
     across the set (present in at least ``min_shows`` files total).
 
-    Each unordered pair is aligned and verified **once**; the resulting match
-    credits both files' per-position recurrence counts. Combined with a per-file
-    seed index (built once and reused) and a bucket cap on the seeding step,
-    this keeps a large batch tractable. ``on_progress(done_pairs, total_pairs)``
-    is called after each outer file so callers can report a real ETA.
+    Each unordered pair is aligned and verified once; the match credits both
+    files' per-position recurrence counts. ``on_progress(done_pairs,
+    total_pairs)`` reports progress. With ``workers > 1`` the O(N²) pair work is
+    spread across processes (it is pure-Python CPU work, so threads wouldn't
+    help); any failure falls back to the single-process path automatically.
     """
     n = len(fingerprints)
     if n == 0:
         return []
+    if workers and workers > 1 and n >= PARALLEL_MIN_FILES:
+        try:
+            return _recurring_parallel(fingerprints, p, on_progress, workers)
+        except Exception:  # noqa: BLE001 — never let parallelism break a scan
+            pass
+    return _recurring_serial(fingerprints, p, on_progress)
 
+
+def _recurring_serial(
+    fingerprints: Sequence[Fingerprint],
+    p: DetectParams,
+    on_progress: "Callable[[int, int], None] | None",
+) -> list[list[tuple[float, float]]]:
+    n = len(fingerprints)
     items = [fp.items for fp in fingerprints]
     lens = [len(x) for x in items]
-    # Per-position "how many other files share a real segment here" counts
-    # (2-byte ints handle libraries of up to 65k files).
     counts = [array("H", bytes(2 * L)) for L in lens]
-    # Per-file run thresholds in item units (depend on the file's item rate).
     min_lens = [max(1, round(p.min_seconds / fp.item_sec)) for fp in fingerprints]
     max_gaps = [max(0, round(p.max_gap_seconds / fp.item_sec)) for fp in fingerprints]
-
-    mask = p.mask
-    max_bit_err = p.max_bit_err
-    min_density = p.min_density
     total_pairs = n * (n - 1) // 2
     done = 0
 
     for j in range(1, n):
-        bj = items[j]
+        index_j = _seed_index(items[j], p.key_mask)
         lbj = lens[j]
         cj = counts[j]
-        index_j = _seed_index(bj, p.key_mask)
         for i in range(j):
-            ai = items[i]
-            lai = lens[i]
-            offsets = _ranged_offsets(ai, index_j, p)
-            if offsets:
-                # Mark a pair-match toward recurrence only where the two files
-                # share a *dense, minimum-length run* — not scattered matches.
-                # At a library scale of hundreds of files this per-pair density
-                # guard is what keeps coincidental matches from accumulating
-                # into phantom segments.
-                mlen = min_lens[i]
-                mgap = max_gaps[i]
-                runs_i: set[int] = set()
-                runs_j: set[int] = set()
-                for off, vlo, vhi in offsets:
-                    # Verify only a window around the voting positions — the
-                    # shared segment lives there — instead of the whole file.
-                    lo = vlo - SEG_MARGIN
-                    if lo < 0:
-                        lo = 0
-                    if off < 0 and lo < -off:
-                        lo = -off
-                    hi = vhi + 1 + SEG_MARGIN
-                    if hi > lai:
-                        hi = lai
-                    if hi > lbj - off:
-                        hi = lbj - off
-                    if hi - lo < mlen:
-                        continue
-                    seg = bytearray(hi - lo)
-                    ipos = lo
-                    while ipos < hi:
-                        if ((ai[ipos] ^ bj[ipos + off]) & mask).bit_count() <= max_bit_err:
-                            seg[ipos - lo] = 1
-                        ipos += 1
-                    for rs, re in _runs(seg, mlen, mgap, min_density):
-                        for pos in range(lo + rs, lo + re):
-                            runs_i.add(pos)
-                            runs_j.add(pos + off)
-                if runs_i:
-                    ci = counts[i]
-                    for ip in runs_i:
-                        ci[ip] += 1
-                    for jp in runs_j:
-                        cj[jp] += 1
+            res = _pair_runs(items[i], lens[i], items[j], lbj, index_j,
+                             min_lens[i], max_gaps[i], p)
+            if res:
+                ri, rj = res
+                ci = counts[i]
+                for ip in ri:
+                    ci[ip] += 1
+                for jp in rj:
+                    cj[jp] += 1
             done += 1
         if on_progress:
             on_progress(done, total_pairs)
 
     threshold = p.min_shows - 1
-    results: list[list[tuple[float, float]]] = []
-    for i in range(n):
-        item_sec = fingerprints[i].item_sec
-        recurring = [1 if c >= threshold else 0 for c in counts[i]]
-        runs = _runs(recurring, min_lens[i], max_gaps[i], min_density)
-        seconds = _merge([(s * item_sec, e * item_sec) for s, e in runs])
-        results.append(seconds)
-    return results
+    return [
+        _extract(counts[i], lens[i], threshold, min_lens[i], max_gaps[i],
+                 p.min_density, fingerprints[i].item_sec)
+        for i in range(n)
+    ]
+
+
+# --- parallel detection (process pool) ---------------------------------------
+# Each worker process holds the fingerprint set in module globals (loaded once
+# via the initializer), so per-task payloads are just a file index.
+_PW_ITEMS: list | None = None
+_PW_LENS: list[int] | None = None
+_PW_MINLEN: list[int] | None = None
+_PW_MAXGAP: list[int] | None = None
+_PW_PARAMS: DetectParams | None = None
+
+
+def _pw_init(items, lens, min_lens, max_gaps, params) -> None:
+    global _PW_ITEMS, _PW_LENS, _PW_MINLEN, _PW_MAXGAP, _PW_PARAMS
+    _PW_ITEMS, _PW_LENS = items, lens
+    _PW_MINLEN, _PW_MAXGAP, _PW_PARAMS = min_lens, max_gaps, params
+
+
+def _pw_pairs_for_j(j: int) -> dict[int, dict[int, int]]:
+    """All pairs (i, j) for i < j, as sparse per-file position counts. Both
+    files of each matching pair are credited, so the merge of all j reproduces
+    the serial accumulation exactly."""
+    items, lens, p = _PW_ITEMS, _PW_LENS, _PW_PARAMS
+    index_j = _seed_index(items[j], p.key_mask)
+    lbj = lens[j]
+    local: dict[int, dict[int, int]] = {}
+    for i in range(j):
+        res = _pair_runs(items[i], lens[i], items[j], lbj, index_j,
+                         _PW_MINLEN[i], _PW_MAXGAP[i], p)
+        if not res:
+            continue
+        ri, rj = res
+        di = local.setdefault(i, {})
+        for pos in ri:
+            di[pos] = di.get(pos, 0) + 1
+        dj = local.setdefault(j, {})
+        for pos in rj:
+            dj[pos] = dj.get(pos, 0) + 1
+    return local
+
+
+def _recurring_parallel(
+    fingerprints: Sequence[Fingerprint],
+    p: DetectParams,
+    on_progress: "Callable[[int, int], None] | None",
+    workers: int,
+) -> list[list[tuple[float, float]]]:
+    n = len(fingerprints)
+    # array('Q') keeps the fingerprints compact (8 bytes/item) so they pickle to
+    # the workers cheaply and don't balloon memory under spawn.
+    items = [array("Q", fp.items) for fp in fingerprints]
+    lens = [len(x) for x in items]
+    min_lens = [max(1, round(p.min_seconds / fp.item_sec)) for fp in fingerprints]
+    max_gaps = [max(0, round(p.max_gap_seconds / fp.item_sec)) for fp in fingerprints]
+
+    totals: dict[int, dict[int, int]] = {}
+    total_pairs = n * (n - 1) // 2
+    done = 0
+    with ProcessPoolExecutor(
+        max_workers=workers, initializer=_pw_init,
+        initargs=(items, lens, min_lens, max_gaps, p),
+    ) as ex:
+        futures = {ex.submit(_pw_pairs_for_j, j): j for j in range(1, n)}
+        for fut in as_completed(futures):
+            j = futures[fut]
+            for f, d in fut.result().items():
+                td = totals.get(f)
+                if td is None:
+                    totals[f] = dict(d)
+                else:
+                    for pos, c in d.items():
+                        td[pos] = td.get(pos, 0) + c
+            done += j
+            if on_progress:
+                on_progress(done, total_pairs)
+
+    threshold = p.min_shows - 1
+    return [
+        _extract(totals.get(i, {}), lens[i], threshold, min_lens[i], max_gaps[i],
+                 p.min_density, fingerprints[i].item_sec)
+        for i in range(n)
+    ]
 
 
 # --- §7  Matching a *known* pattern against a new file -----------------------
