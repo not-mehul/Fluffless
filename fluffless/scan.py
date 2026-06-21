@@ -32,6 +32,7 @@ from .repetition import (
     Fingerprint,
     best_ratio,
     locate,
+    locate_all,
     recurring_segments,
 )
 
@@ -115,11 +116,12 @@ def scan_folder(
         db.store_fingerprint(mf.path, folder, fp)
     result.files_scanned = len(prints)
 
-    # 2. Match known *ad* signatures against each file (works for a single file).
-    #    Only Ad-labeled patterns are reused as known signatures — intro/outro/
-    #    other are redundant to re-match, and unlabeled detections would risk
-    #    forcing spurious clips onto new files.
-    known = [row for row in db.patterns(folder) if row["label"] == "Ad"]
+    # 2. Match *confirmed* signatures against each file (works for a single
+    #    file). Only segments the user has confirmed as ads are reused as known
+    #    signatures — pending/dismissed ones aren't approved, and forcing them
+    #    onto new files would pre-empt the user's review. ``locate_all`` catches
+    #    every airing in a file, so an ad shown twice gets two clips.
+    known = [row for row in db.patterns(folder) if row["status"] == "confirmed"]
     for mf, fp in prints:
         p = base.scaled(fp.bits)
         for row in known:
@@ -128,21 +130,19 @@ def scan_folder(
             if row["duration"] < base.min_seconds:
                 continue  # honour the minimum-length filter for stored patterns too
             items = db.pattern_items(row)
-            hit = locate(items, fp.items, p)
-            if hit is None:
-                continue
-            start = hit[0] * fp.item_sec
-            end = hit[1] * fp.item_sec
-            if db.clip_exists(row["id"], mf.path, start):
-                continue
-            preview = make_preview(mf, start, end) if make_preview else None
-            db.add_clip(row["id"], mf.path, start, end, preview)
-            db.bump_pattern(row["id"])
-            result.clips_added += 1
-            if row["id"] not in result.matched_patterns:
-                result.matched_patterns.append(row["id"])
-            _emit(progress, stage="matched", file=mf.name, pattern_id=row["id"],
-                  label=row["label"], start=start, end=end)
+            for s_item, e_item in locate_all(items, fp.items, p):
+                start = s_item * fp.item_sec
+                end = e_item * fp.item_sec
+                if end - start < 0.2 or db.clip_exists(row["id"], mf.path, start):
+                    continue
+                preview = make_preview(mf, start, end) if make_preview else None
+                db.add_clip(row["id"], mf.path, start, end, preview)
+                db.bump_pattern(row["id"])
+                result.clips_added += 1
+                if row["id"] not in result.matched_patterns:
+                    result.matched_patterns.append(row["id"])
+                _emit(progress, stage="matched", file=mf.name, pattern_id=row["id"],
+                      start=start, end=end)
 
     # 3. Cross-file recurrence over the batch (group by bit-width).
     by_bits: dict[int, list[tuple[MediaFile, Fingerprint]]] = {}
@@ -192,10 +192,12 @@ def scan_folder(
 def apply_pattern_to_stored(
     db: Database, pattern_id: int, base: DetectParams | None = None,
 ) -> int:
-    """Locate one pattern's fingerprint in every cached file fingerprint of its
-    folder and add a clip wherever it occurs but isn't already recorded. This is
-    how a newly-identified ad is back-applied to files that were scanned before
-    it existed — no audio is re-read. Returns the number of clips added."""
+    """Locate every occurrence of one pattern's fingerprint in every cached file
+    of its folder and add a clip wherever it occurs but isn't already recorded.
+    This is the "re-parse all media for this confirmed segment" step: confirming
+    an ad back-applies it to files scanned before it was known *and* catches any
+    repeat airings within a file (``locate_all``) — no audio is re-read. Returns
+    the number of clips added."""
     base = base or DetectParams()
     row = db.pattern(pattern_id)
     if row is None:
@@ -208,16 +210,14 @@ def apply_pattern_to_stored(
     for file_path, fp in db.fingerprints(row["folder"]):
         if fp.bits != row["bits"]:
             continue
-        hit = locate(items, fp.items, p)
-        if hit is None:
-            continue
-        start = hit[0] * fp.item_sec
-        end = hit[1] * fp.item_sec
-        if end - start < 0.2 or db.clip_exists(pattern_id, file_path, start):
-            continue
-        db.add_clip(pattern_id, file_path, start, end)
-        db.bump_pattern(pattern_id)
-        added += 1
+        for s_item, e_item in locate_all(items, fp.items, p):
+            start = s_item * fp.item_sec
+            end = e_item * fp.item_sec
+            if end - start < 0.2 or db.clip_exists(pattern_id, file_path, start):
+                continue
+            db.add_clip(pattern_id, file_path, start, end)
+            db.bump_pattern(pattern_id)
+            added += 1
     return added
 
 
@@ -303,7 +303,7 @@ def _store_segment(
 
     if match_id is None:
         match_id = db.add_pattern(
-            library, folder, items, fp.item_sec, fp.bits, end - start, label="Other",
+            library, folder, items, fp.item_sec, fp.bits, end - start, status="pending",
         )
     else:
         if db.clip_exists(match_id, mf.path, start):

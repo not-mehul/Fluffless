@@ -63,7 +63,7 @@ def test_normalize_pattern_lengths_fixes_clipped_outlier():
     with tempfile.TemporaryDirectory() as root:
         db = Database.open(root)
         p = DetectParams()
-        pid = db.add_pattern(root, "Show", ad, isec, 32, 1000 * isec, "Ad")
+        pid = db.add_pattern(root, "Show", ad, isec, 32, 1000 * isec, "confirmed")
         for i, (path, head) in enumerate(layout):
             length = 700 if i == 3 else 1000          # ep3 clipped short
             db.add_clip(pid, path, head * isec, (head + length) * isec)

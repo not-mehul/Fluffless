@@ -500,6 +500,46 @@ def locate(pattern: Sequence[int], b: Sequence[int], p: DetectParams) -> tuple[i
     return max(0, min(hits)), min(len(b), max(hits) + 1)
 
 
+def locate_all(pattern: Sequence[int], b: Sequence[int], p: DetectParams) -> list[tuple[int, int]]:
+    """Every place ``pattern`` occurs in fingerprint ``b`` — not just the best
+    one. Returns a sorted list of non-overlapping (start, end) item ranges.
+
+    The same ad can air more than once in a single episode (mid-rolls, repeated
+    sponsor reads); each airing aligns at its own offset, so we evaluate every
+    candidate offset, keep those that cover enough of the pattern, and greedily
+    accept the strongest spans that don't overlap one already taken. This is
+    what lets a confirmed segment be cut from *all* its occurrences, not one.
+    """
+    if not pattern or not b:
+        return []
+    plen = len(pattern)
+    nb = len(b)
+    spans: list[tuple[int, int, int]] = []   # (coverage, start, end)
+    for off in candidate_offsets(pattern, b, p):
+        cov = coverage_at(pattern, b, off, p)
+        n = sum(cov)
+        if n / plen < p.locate_min_ratio:
+            continue
+        hits = [i + off for i, c in enumerate(cov) if c]
+        if not hits:
+            continue
+        s = max(0, min(hits))
+        e = min(nb, max(hits) + 1)
+        if e > s:
+            spans.append((n, s, e))
+    # Strongest first, then greedily keep spans that don't overlap a taken one,
+    # so two airings of the same ad are both reported but a single airing seen
+    # at two near-identical offsets collapses to one.
+    spans.sort(reverse=True)
+    chosen: list[tuple[int, int]] = []
+    for _n, s, e in spans:
+        if all(e <= cs or s >= ce for cs, ce in chosen):
+            chosen.append((s, e))
+    chosen.sort()
+    return chosen
+
+
+
 def best_ratio(pattern: Sequence[int], b: Sequence[int], p: DetectParams) -> float:
     """The fraction of ``pattern`` that aligns to ``b`` at its best offset.
 

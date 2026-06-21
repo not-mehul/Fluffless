@@ -48,28 +48,29 @@ def test_scan_skips_output_dirs():
 def test_database_roundtrip_and_export():
     with tempfile.TemporaryDirectory() as root:
         db = Database.open(root)
-        pid = db.add_pattern(root, "Show", [1, 2, 3, 4], 0.1238, 32, 6.0, label="Other")
+        pid = db.add_pattern(root, "Show", [1, 2, 3, 4], 0.1238, 32, 6.0)
         db.add_clip(pid, "/x/ep1.mp3", 3.0, 9.0, preview="ep1.m4a")
-        db.set_label(pid, "Ad")
+        assert db.patterns("Show")[0]["status"] == "pending"   # detected, undecided
+        db.set_status(pid, "confirmed")
         db.bump_pattern(pid)
 
         rows = db.patterns("Show")
         assert len(rows) == 1
-        assert rows[0]["label"] == "Ad"
+        assert rows[0]["status"] == "confirmed"
         assert rows[0]["shows"] == 2
         assert db.pattern_items(rows[0]) == [1, 2, 3, 4]
         assert db.clip_exists(pid, "/x/ep1.mp3", 3.0)
         assert not db.clip_exists(pid, "/x/ep1.mp3", 50.0)
 
         db.add_processed("/x/ep1.mp3", "/out/ep1.mp3",
-                         [{"start": 3.0, "end": 9.0, "label": "Ad"}], 6.0)
+                         [{"start": 3.0, "end": 9.0}], 6.0)
         assert db.is_processed("/x/ep1.mp3")
 
         export = json.loads(db.export_json())
-        assert export["patterns"][0]["label"] == "Ad"
+        assert export["patterns"][0]["status"] == "confirmed"
         assert len(export["clips"]) == 1
         md = db.export_markdown()
-        assert "Ad" in md and "ep1.mp3" in md
+        assert "confirmed" in md and "ep1.mp3" in md
         db.close()
 
 

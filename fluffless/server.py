@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .binaries import detect_tools
 from .clips import OUT_DIR, extract_preview, remove_segments
-from .db import LABELS, Database
+from .db import STATUSES, Database
 from .media import scan_library
 from .repetition import DetectParams
 from .scan import apply_pattern_to_stored, scan_folder
@@ -102,7 +102,7 @@ def _enrich(payload: dict, job: ScanJob) -> dict:
         if done >= 1:
             ev["eta_seconds"] = round((det_elapsed / done) * (total - done))
     elif stage == "matched":
-        ev["message"] = f"Matched a known {payload.get('label', '')} · {payload.get('file', '')}"
+        ev["message"] = f"Matched a confirmed segment · {payload.get('file', '')}"
     elif stage == "found":
         ev["message"] = f"New segment · {payload.get('file', '')}"
     elif stage == "normalize":
@@ -146,7 +146,7 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
         out.append({
             "id": row["id"],
             "folder": row["folder"],
-            "label": row["label"],
+            "status": row["status"] if "status" in keys else "pending",
             "duration": round(row["duration"], 2),
             "shows": row["shows"],
             "bits": row["bits"],
@@ -288,8 +288,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_open_library()
             if path == "/api/scan":
                 return self._api_scan()
-            if path == "/api/label":
-                return self._api_label()
+            if path == "/api/pattern/review":
+                return self._api_pattern_review()
             if path == "/api/remove":
                 return self._api_remove()
             if path == "/api/preview":
@@ -329,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({
             "tools": st.tools.status(),
             "library": st.library,
-            "labels": list(LABELS),
+            "statuses": list(STATUSES),
             "workers": st.workers,
             "folders": [f.to_dict() for f in st.folders] if st.library else [],
         })
@@ -453,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ConnectionError, OSError):
             pass  # client closed the stream (refresh, navigate, WinError 10053)
 
-    # --- API: patterns & labels ----------------------------------------------
+    # --- API: patterns & review ----------------------------------------------
 
     def _api_patterns(self, qs) -> None:
         if not self.state.db:
@@ -461,29 +461,37 @@ class Handler(BaseHTTPRequestHandler):
         folder = (qs.get("folder") or [None])[0]
         self._json({"patterns": patterns_payload(self.state.db, folder)})
 
-    def _api_label(self) -> None:
+    def _api_pattern_review(self) -> None:
+        """Record the user's verdict on a detected segment. ``decision`` is one
+        of ``ad`` (confirm — approve for removal), ``not_ad`` (dismiss), or
+        ``pending`` (undo). Confirming an ad immediately re-parses every cached
+        file for *all* its occurrences, so by the time the user removes, the
+        confirmed segment is found everywhere it airs — including repeats."""
         if not self.state.db:
             return self._error("open a library first")
         body = self._body()
         pid = body.get("pattern_id")
-        label = body.get("label")
-        if label not in LABELS:
-            return self._error(f"label must be one of {LABELS}")
+        decision = body.get("decision")
+        mapping = {"ad": "confirmed", "not_ad": "dismissed", "pending": "pending"}
+        status = mapping.get(decision)
+        if status is None:
+            return self._error("decision must be one of: ad, not_ad, pending")
         st = self.state
-        st.db.set_label(int(pid), label)
-        # Identifying an ad turns its fingerprint into a known signature: locate
-        # it across every cached file in the folder and tag any occurrences that
-        # were scanned before this ad was known. Only ads — pointless for others.
+        row = st.db.pattern(int(pid))
+        if not row:
+            return self._error("unknown segment", 404)
+        st.db.set_status(int(pid), status)
+        # Confirming turns the fingerprint into a known signature: re-parse every
+        # cached file in the folder for every occurrence (locate_all), tagging
+        # airings that pre-dated the confirmation. Only on confirm.
         applied = 0
-        folder = None
-        if label == "Ad":
+        if status == "confirmed":
             applied = apply_pattern_to_stored(st.db, int(pid))
-            row = st.db.pattern(int(pid))
-            folder = row["folder"] if row else None
         self._json({
             "ok": True,
+            "status": status,
             "applied_to": applied,
-            "patterns": patterns_payload(st.db, folder) if applied else None,
+            "patterns": patterns_payload(st.db, row["folder"]),
         })
 
     # --- API: remove the fluff -----------------------------------------------
@@ -504,23 +512,23 @@ class Handler(BaseHTTPRequestHandler):
             folder = st.folder(body.get("folder"))
             if not folder:
                 return self._error("unknown folder", 404)
-            labels = body.get("labels") or ["Ad"]
             chosen = set(body.get("files") or [])
 
-            # Every segment of every matching-label pattern, grouped per file —
-            # so a file with several ads has them all cut in one pass.
-            per_file: dict[str, list[tuple[float, float, str]]] = {}
+            # Every occurrence of every *confirmed* segment, grouped per file —
+            # so a file with several ads has them all cut in one pass. Removal
+            # acts only on what the user approved; pending/dismissed are skipped.
+            per_file: dict[str, list[tuple[float, float]]] = {}
             for row in st.db.patterns(folder.name):
-                if row["label"] not in labels:
+                if row["status"] != "confirmed":
                     continue
                 for c in st.db.clips(row["id"]):
                     if chosen and c["file_path"] not in chosen:
                         continue
                     per_file.setdefault(c["file_path"], []).append(
-                        (c["start"], c["end"], row["label"])
+                        (c["start"], c["end"])
                     )
             if not per_file:
-                return self._error("no segments selected to remove")
+                return self._error("no confirmed segments to remove")
 
             try:
                 workers = int(body.get("workers") or st.workers)
@@ -546,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
             mf = file_by_path.get(fpath)
             duration = mf.duration if mf else _max_end(segs)
             kind = mf.kind if mf else None
-            ranges = sorted((s, e) for s, e, _ in segs)
+            ranges = sorted((s, e) for s, e in segs)
             out = remove_segments(fpath, ranges, duration, out_dir, st.tools, kind)
             saved = sum(e - s for s, e in ranges)
             return out, saved
@@ -566,7 +574,7 @@ class Handler(BaseHTTPRequestHandler):
                         out, saved = fut.result()
                         st.db.add_processed(
                             fpath, out,
-                            [{"start": round(s, 2), "end": round(e, 2), "label": l} for s, e, l in segs],
+                            [{"start": round(s, 2), "end": round(e, 2)} for s, e in segs],
                             saved,
                         )
                         res = {"file": name, "output": os.path.relpath(out, folder.path),
@@ -794,7 +802,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error("unknown clip", 404)
         target = body.get("target_pattern_id")
         if target in (None, "", "new"):
-            res = st.db.new_group_from_clip(clip["id"], label=body.get("label") or "Other")
+            res = st.db.new_group_from_clip(clip["id"], status="pending")
         else:
             src = st.db.pattern(clip["pattern_id"])
             tgt = st.db.pattern(int(target))
@@ -956,7 +964,7 @@ def _params_from(body: dict) -> DetectParams:
 
 
 def _max_end(segs) -> float:
-    return max((e for _, e, _ in segs), default=0.0) + 1.0
+    return max((e for _, e in segs), default=0.0) + 1.0
 
 
 def serve(library: str | None, host: str = "127.0.0.1", port: int = 7654,

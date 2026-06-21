@@ -73,7 +73,6 @@
   // ---------- state ----------
   const state = {
     library: null,
-    labels: ["Ad", "Intro", "Outro", "Other"],
     folders: [],
     folder: null,        // active folder object
     scope: "all",
@@ -81,8 +80,13 @@
     filesCollapsed: false,
     processedNames: new Set(),
     patterns: [],
-    removeLabels: new Set(["Ad"]),
   };
+
+  // Review lifecycle, mirrored from the server: a detected segment is pending
+  // until the user decides; confirmed = "this is an ad, remove it"; dismissed =
+  // "not an ad, leave it". Pending sorts first so what needs attention leads.
+  const STATUS_VERB = { pending: "Needs review", confirmed: "Confirmed ad", dismissed: "Not an ad" };
+  const STATUS_ORDER = { pending: 0, confirmed: 1, dismissed: 2 };
 
   const $ = (id) => document.getElementById(id);
   const fmtDur = (s) => {
@@ -100,7 +104,6 @@
   async function boot() {
     try {
       const st = await api("/api/status");
-      state.labels = st.labels || state.labels;
       renderEngines(st.tools);
       if (st.library) {
         state.library = st.library;
@@ -175,7 +178,6 @@
     document.querySelectorAll("#scopeSeg button").forEach((b) =>
       b.classList.toggle("active", b.dataset.scope === "all"));
     renderFileList();
-    renderRemoveLabels();
     await Promise.all([loadPatterns(), refreshProcessed()]);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -324,7 +326,6 @@
     if (ev.stage === "result") {
       state.patterns = ev.patterns || [];
       renderPatterns();
-      renderRemoveLabels();
       endScanUI("complete");
       const found = (ev.new_patterns || []).length;
       const matched = (ev.matched_patterns || []).length;
@@ -408,34 +409,39 @@
     chip.textContent = String(state.patterns.length);
     chip.classList.remove("hidden");
     wrap.innerHTML = "";
-    state.patterns.forEach((p) => wrap.appendChild(renderPattern(p)));
+    const ordered = [...state.patterns].sort((a, b) =>
+      (STATUS_ORDER[a.status] ?? 0) - (STATUS_ORDER[b.status] ?? 0) || a.id - b.id);
+    ordered.forEach((p) => wrap.appendChild(renderPattern(p)));
+    updateRemoveSummary();
   }
 
   function renderPattern(p) {
     const el = document.createElement("div");
-    el.className = "pattern " + p.label;
+    el.className = "pattern " + (p.status || "pending");
     el.dataset.id = p.id;
-
-    const labelBtns = state.labels.map((l) =>
-      `<button data-label="${l}" class="${l === p.label ? "active" : ""}">${l}</button>`).join("");
 
     const clips = p.clips.map((c) => renderClip(c)).join("");
 
     el.innerHTML = `
       <div class="pattern-head">
         <div class="pattern-title">
-          <span class="status-verb">${p.label}</span>
+          <span class="status-verb">${STATUS_VERB[p.status] || STATUS_VERB.pending}</span>
           <span class="pattern-chips">
             <span class="chip-mono">${fmtDur(p.duration)}</span>
             <span class="chip-mono">${p.shows} show${p.shows === 1 ? "" : "s"}</span>
-            <span class="chip-mono">${p.clips.length} clip${p.clips.length === 1 ? "" : "s"}</span>
-            ${(p.pinned || p.head_trim || p.tail_trim) ? `<span class="chip-mono custom" title="This pattern's saved fingerprint was set by hand">custom</span>` : ""}
+            <span class="chip-mono">${p.clips.length} occurrence${p.clips.length === 1 ? "" : "s"}</span>
+            ${(p.pinned || p.head_trim || p.tail_trim) ? `<span class="chip-mono custom" title="This segment's saved fingerprint was set by hand">custom</span>` : ""}
           </span>
         </div>
         <div class="pattern-controls">
-          <div class="pattern-labels">${labelBtns}</div>
+          <div class="review-controls">
+            <button class="review-btn ad ${p.status === "confirmed" ? "active" : ""}" data-decision="ad"
+              title="Confirm this is an ad — cut it from every file">${icon(ICON_CHECK, 14)}<span>Mark as ad</span></button>
+            <button class="review-btn no ${p.status === "dismissed" ? "active" : ""}" data-decision="not_ad"
+              title="Not an ad — set it aside">${icon(ICON_X, 14)}<span>Not an ad</span></button>
+          </div>
           <button class="icon-btn trim-btn" title="Trim boundaries" aria-label="Trim boundaries">${icon(ICON_SCISSORS, 15)}</button>
-          <button class="icon-btn danger pattern-del" title="Delete pattern" aria-label="Delete pattern">${icon(ICON_TRASH, 15)}</button>
+          <button class="icon-btn danger pattern-del" title="Delete segment" aria-label="Delete segment">${icon(ICON_TRASH, 15)}</button>
         </div>
       </div>
       <div class="trim-panel hidden">
@@ -448,8 +454,8 @@
       </div>
       <div class="clip-list">${clips}</div>`;
 
-    el.querySelectorAll(".pattern-labels button").forEach((b) => {
-      b.addEventListener("click", () => setLabel(p, b.dataset.label, el));
+    el.querySelectorAll(".review-controls .review-btn").forEach((b) => {
+      b.addEventListener("click", () => reviewPattern(p, b.dataset.decision));
     });
     el.querySelector(".pattern-del").addEventListener("click", () => deletePattern(p.id));
     el.querySelector(".trim-btn").addEventListener("click", () => {
@@ -493,7 +499,6 @@
       const res = await post("/api/pattern/adjust", { pattern_id: p.id, head, tail });
       state.patterns = res.patterns || state.patterns;
       renderPatterns();
-      renderRemoveLabels();
       toast(`Trimmed ${res.clips_adjusted} clip(s) — regenerate previews to verify`, "notice");
     } catch (e) {
       toast(e.message, "error");
@@ -508,8 +513,7 @@
       const res = await post("/api/pattern/reset", { pattern_id: p.id });
       state.patterns = res.patterns || state.patterns;
       renderPatterns();
-      renderRemoveLabels();
-      toast("Pattern reset to detected defaults", "notice");
+      toast("Segment reset to detected defaults", "notice");
     } catch (e) {
       toast(e.message, "error");
       btn.disabled = false; btn.textContent = "Reset to default";
@@ -527,7 +531,7 @@
     const n = p.clips.length;
     const otherPatterns = state.patterns.filter((op) => op.id !== p.id);
     const moveOpts = otherPatterns.map((op) =>
-      `<option value="${op.id}">${escapeHtml(op.label)} – ${fmtDur(op.duration)} (${op.shows} show${op.shows === 1 ? "" : "s"})</option>`
+      `<option value="${op.id}">${STATUS_VERB[op.status] || "Segment"} · ${fmtDur(op.duration)} · ${op.shows} show${op.shows === 1 ? "" : "s"}</option>`
     ).join("");
 
     slot.innerHTML = `
@@ -575,7 +579,6 @@
       const res = await post("/api/clip/propagate", { clip_id: c.id, start, end });
       state.patterns = res.patterns || state.patterns;
       renderPatterns();
-      renderRemoveLabels();
       const trim = [];
       if (res.head) trim.push(`${res.head}s off the start`);
       if (res.tail) trim.push(`${res.tail}s off the end`);
@@ -649,7 +652,6 @@
       const res = await post("/api/pattern/fingerprint", { clip_id: c.id, start, end });
       state.patterns = res.patterns || state.patterns;
       renderPatterns();
-      renderRemoveLabels();
       toast(`Fingerprint saved — ${fmtDur(res.duration)} region locked for future detection`, "notice");
     } catch (e) {
       toast(e.message, "error");
@@ -662,8 +664,7 @@
       const res = await post("/api/clip/move", { clip_id: c.id, target_pattern_id: targetId });
       state.patterns = res.patterns || state.patterns;
       renderPatterns();
-      renderRemoveLabels();
-      toast(targetId === "new" ? "Split into new group" : "Clip moved to group", "notice");
+      toast(targetId === "new" ? "Split into a new segment" : "Occurrence moved", "notice");
     } catch (e) { toast(e.message, "error"); }
   }
 
@@ -689,23 +690,26 @@
     setLabel(ICON_X, "Hide");
   }
 
-  async function setLabel(p, label, el) {
+  // Record an Ad / Not-an-ad verdict. Re-clicking the current verdict toggles
+  // back to needs-review, so a mistaken tap is one click to undo. Confirming an
+  // ad re-parses every file for all its occurrences (server-side).
+  async function reviewPattern(p, decision) {
+    let target = decision;
+    if (decision === "ad" && p.status === "confirmed") target = "pending";
+    else if (decision === "not_ad" && p.status === "dismissed") target = "pending";
     try {
-      const res = await post("/api/label", { pattern_id: p.id, label });
-      p.label = label;
-      // Labeling an Ad may have tagged more files (it's now a known signature).
-      if (res.applied_to && res.patterns) {
-        state.patterns = res.patterns;
-        renderPatterns();
-        renderRemoveLabels();
-        toast(`Ad identified — found in ${res.applied_to} more file${res.applied_to === 1 ? "" : "s"}`, "notice");
-        return;
+      const res = await post("/api/pattern/review", { pattern_id: p.id, decision: target });
+      state.patterns = res.patterns || state.patterns;
+      renderPatterns();
+      if (res.status === "confirmed") {
+        toast(res.applied_to
+          ? `Confirmed — found ${res.applied_to} occurrence${res.applied_to === 1 ? "" : "s"} across your files`
+          : "Confirmed as an ad — will be removed", "notice");
+      } else if (res.status === "dismissed") {
+        toast("Set aside — won't be removed", "notice");
+      } else {
+        toast("Back to needs-review", "notice");
       }
-      el.className = "pattern " + label;
-      el.querySelector(".status-verb").textContent = label;
-      el.querySelectorAll(".pattern-labels button").forEach((b) =>
-        b.classList.toggle("active", b.dataset.label === label));
-      renderRemoveLabels();
     } catch (e) { toast(e.message, "error"); }
   }
 
@@ -714,43 +718,18 @@
       await api(`/api/pattern/${id}`, { method: "DELETE" });
       state.patterns = state.patterns.filter((p) => p.id !== id);
       renderPatterns();
-      renderRemoveLabels();
-      toast("Pattern removed", "notice");
+      toast("Segment removed", "notice");
     } catch (e) { toast(e.message, "error"); }
   }
 
   // ---------- remove the fluff ----------
-  function renderRemoveLabels() {
-    const present = new Set(state.patterns.map((p) => p.label));
-    const grid = $("removeLabels");
-    grid.innerHTML = "";
-    state.labels.forEach((l) => {
-      const count = state.patterns.filter((p) => p.label === l).length;
-      const label = document.createElement("label");
-      label.className = "check";
-      const on = state.removeLabels.has(l);
-      label.innerHTML = `
-        <input type="checkbox" ${on ? "checked" : ""} ${count ? "" : "disabled"}/>
-        <span class="box">${icon('<path d="m5 12 5 5L20 7"/>', 12)}</span>
-        <span class="clabel">${l} <span class="mono" style="color:var(--text-faint);font-size:0.75em">(${count})</span></span>`;
-      const cb = label.querySelector("input");
-      cb.addEventListener("change", () => {
-        if (cb.checked) state.removeLabels.add(l); else state.removeLabels.delete(l);
-        updateRemoveSummary();
-      });
-      grid.appendChild(label);
-    });
-    updateRemoveSummary();
-  }
-
+  // Removal acts on everything confirmed as an ad — no per-category picking.
   function updateRemoveSummary() {
-    const labels = [...state.removeLabels];
-    const clips = state.patterns
-      .filter((p) => labels.includes(p.label))
-      .reduce((n, p) => n + p.clips.length, 0);
+    const confirmed = state.patterns.filter((p) => p.status === "confirmed");
+    const clips = confirmed.reduce((n, p) => n + p.clips.length, 0);
     $("removeSummary").textContent = clips
-      ? `${clips} segment${clips === 1 ? "" : "s"} across ${labels.join(", ")} will be cut`
-      : "Nothing selected to remove";
+      ? `${clips} occurrence${clips === 1 ? "" : "s"} from ${confirmed.length} confirmed segment${confirmed.length === 1 ? "" : "s"} will be cut`
+      : "Mark a segment as an ad above to remove it";
     $("removeBtn").disabled = !clips;
   }
 
@@ -778,14 +757,13 @@
 
   let removeSource = null;
   async function runRemove() {
-    const labels = [...state.removeLabels];
-    if (!labels.length) return;
+    if (!state.patterns.some((p) => p.status === "confirmed")) return;
     const btn = $("removeBtn");
     btn.disabled = true;
     $("removeResults").innerHTML = "";
     startRemoveUI();
     try {
-      await post("/api/remove", { folder: state.folder.name, labels });
+      await post("/api/remove", { folder: state.folder.name });
       openRemoveStream();
     } catch (e) {
       toast(e.message, "error");
