@@ -25,7 +25,12 @@ from .clips import OUT_DIR, extract_preview, remove_segments
 from .db import STATUSES, Database
 from .media import scan_library
 from .repetition import DetectParams
-from .scan import absorb_overlapping_pending, apply_pattern_to_stored, scan_folder
+from .scan import (
+    absorb_overlapping_pending,
+    apply_pattern_to_stored,
+    relocate_group_from_clip,
+    scan_folder,
+)
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 PREVIEW_DIR = "previews"
@@ -298,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_clip_adjust()
             if path == "/api/clip/propagate":
                 return self._api_clip_propagate()
+            if path == "/api/clip/relocate":
+                return self._api_clip_relocate()
             if path == "/api/clip/reset":
                 return self._api_clip_reset()
             if path == "/api/clip/move":
@@ -691,6 +698,42 @@ class Handler(BaseHTTPRequestHandler):
             "head": round(head, 2),
             "tail": round(tail, 2),
             "patterns": patterns_payload(st.db, pattern["folder"] if pattern else None),
+        })
+
+    def _api_clip_relocate(self) -> None:
+        """Find one clip's cropped segment across the whole folder and re-derive
+        its group from it: snap every match to the same length, pull in episodes
+        that weren't grouped, and move clips that no longer match into their own
+        group. Optionally crops the reference clip first, in one action."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        clip = st.db.clip(int(body.get("clip_id")))
+        if not clip:
+            return self._error("unknown clip", 404)
+        if body.get("start") is not None and body.get("end") is not None:
+            try:
+                start = max(0.0, float(body["start"]))
+                end = float(body["end"])
+            except (TypeError, ValueError):
+                return self._error("start and end must be numbers")
+            if end - start < 0.2:
+                return self._error("end must be at least 0.2s after start")
+            st.db.update_clip_bounds(clip["id"], start, end)
+            self._rebuild_preview(clip["id"])
+        res = relocate_group_from_clip(st.db, clip["id"])
+        if res is None:
+            return self._error("unknown clip", 404)
+        if "error" in res:
+            return self._error(res["error"])
+        self._json({
+            "ok": True,
+            "snapped": res["snapped"],
+            "added": res["added"],
+            "moved_out": res["moved_out"],
+            "duration": round(res["duration"], 2),
+            "patterns": patterns_payload(st.db, res["folder"]),
         })
 
     def _api_pattern_adjust(self) -> None:

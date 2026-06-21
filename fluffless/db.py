@@ -363,6 +363,13 @@ class Database:
             )
         return n
 
+    def recount_shows(self, pattern_id: int) -> int:
+        """Public wrapper: set a pattern's ``shows`` to its live clip count (and
+        delete it if it has none), committing the change. Returns the new count."""
+        n = self._recount_shows(pattern_id)
+        self.conn.commit()
+        return n
+
     def move_clip(self, clip_id: int, target_pattern_id: int) -> dict | None:
         """Reassign one clip to another existing pattern in the same folder —
         correcting a mis-grouping. Recounts both patterns and removes the source
