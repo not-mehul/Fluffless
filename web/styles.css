@@ -299,6 +299,29 @@ body { transition: background 0.3s; }
   line-height: 1.2; }
 .folder-meta { font-family: var(--mono); font-size: 0.7rem; color: var(--text-dim); }
 
+/* At-a-glance shelf state: review / confirmed / trimmed / new pills */
+.folder-badges { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.1rem; min-height: 1.1rem; }
+.fbadge { font-family: var(--mono); font-size: 0.56rem; letter-spacing: 0.08em;
+  text-transform: uppercase; border-radius: 2px; padding: 0.12rem 0.4rem;
+  border: 1px solid var(--border-faint); color: var(--text-dim); background: var(--chip-bg); }
+.fbadge.new { color: var(--accent-amber); border-color: rgba(var(--accent-amber-rgb), 0.5);
+  background: rgba(var(--accent-amber-rgb), 0.1); }
+.fbadge.review { color: var(--accent-amber); border-color: rgba(var(--accent-amber-rgb), 0.35); }
+.fbadge.ad { color: var(--accent-sage); border-color: rgba(var(--accent-sage-rgb), 0.4); }
+.fbadge.done { color: var(--accent-sage); border-color: rgba(var(--accent-sage-rgb), 0.25); opacity: 0.85; }
+.fbadge.muted { color: var(--text-faint); }
+
+/* "Trim after" toggle beside the Process-new-files button */
+.auto-trim { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;
+  font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-dim); user-select: none; }
+.auto-trim input { accent-color: var(--accent-amber); cursor: pointer; }
+.auto-trim:hover { color: var(--text-heading); }
+
+/* Folder-refresh spin while re-reading the directory */
+#refreshFolderBtn.spinning svg { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ---------- 9. Scan controls ---------- */
 .control-head { display: flex; align-items: center; justify-content: space-between;
   gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }

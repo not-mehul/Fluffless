@@ -73,6 +73,8 @@
     filesCollapsed: false,
     processedNames: new Set(),
     patterns: [],
+    newFiles: [],        // paths in the active folder not yet fingerprinted
+    pendingAutoRemove: null,  // file paths to auto-trim once an incremental scan finishes
   };
 
   // Review lifecycle, mirrored from the server: a detected segment is pending
@@ -149,11 +151,37 @@
       card.innerHTML = `
         <span class="folder-logo">${icon(logo, 22)}<span class="kind">${f.kind}</span></span>
         <span class="folder-name">${escapeHtml(f.name)}</span>
-        <span class="folder-meta">${f.count} file${f.count === 1 ? "" : "s"}</span>`;
+        <span class="folder-meta">${f.count} file${f.count === 1 ? "" : "s"}</span>
+        <span class="folder-badges" data-folder="${escapeHtml(f.name)}"></span>`;
       card.addEventListener("click", () => openFolder(f.name));
       grid.appendChild(card);
     });
     refreshProcessed();
+    loadFolderStats();
+  }
+
+  // Paint the shelf cards with at-a-glance state: what still needs review,
+  // what's confirmed, what's been trimmed, and what's newly dropped in.
+  async function loadFolderStats() {
+    try {
+      const res = await api("/api/folders/stats");
+      const stats = res.stats || {};
+      document.querySelectorAll(".folder-badges").forEach((el) => {
+        const s = stats[el.dataset.folder];
+        if (!s) return;
+        const pills = [];
+        if (!s.scanned) {
+          pills.push(`<span class="fbadge muted">Not scanned</span>`);
+        } else {
+          if (s.new_count) pills.push(`<span class="fbadge new">${s.new_count} new</span>`);
+          if (s.pending) pills.push(`<span class="fbadge review">${s.pending} to review</span>`);
+          if (s.confirmed) pills.push(`<span class="fbadge ad">${s.confirmed} confirmed</span>`);
+          if (s.trimmed) pills.push(`<span class="fbadge done">${s.trimmed} trimmed</span>`);
+          if (!pills.length) pills.push(`<span class="fbadge muted">Scanned</span>`);
+        }
+        el.innerHTML = pills.join("");
+      });
+    } catch (_) { /* non-fatal */ }
   }
 
   // ---------- folder workspace ----------
@@ -209,28 +237,59 @@
   async function checkNewFiles(folderName) {
     try {
       const res = await api(`/api/scan/new?folder=${encodeURIComponent(folderName)}`);
+      state.newFiles = res.new_files || [];
       const btn = $("processNewBtn");
       const label = btn.querySelector(".btn-label");
+      const hasConfirmed = state.patterns.some((p) => p.status === "confirmed");
       if (res.new_count > 0) {
         label.textContent = `Process ${res.new_count} new file${res.new_count === 1 ? "" : "s"}`;
         btn.classList.remove("hidden");
+        // Trim-after only makes sense once there are confirmed ads to apply.
+        $("autoTrimWrap").classList.toggle("hidden", !hasConfirmed);
         $("scanHint").innerHTML = `<em>New files.</em> ${res.new_count} file${res.new_count === 1 ? "" : "s"} added since the last scan. Process just these to apply confirmed patterns — or run a full scan to also discover new segments.`;
       } else {
         btn.classList.add("hidden");
+        $("autoTrimWrap").classList.add("hidden");
         $("scanHint").innerHTML = `<em>Scan.</em> Fingerprints every file and finds the segments that recur across the folder.`;
       }
     } catch (_) { /* non-fatal */ }
   }
 
-  $("processNewBtn").addEventListener("click", () => runScan({ incremental: true }));
+  $("processNewBtn").addEventListener("click", () =>
+    runScan({ incremental: true, autoRemove: $("autoTrim").checked }));
+
+  // ---------- folder refresh ----------
+  $("refreshFolderBtn").addEventListener("click", refreshFolder);
+  async function refreshFolder() {
+    if (!state.folder) return;
+    const btn = $("refreshFolderBtn");
+    btn.disabled = true; btn.classList.add("spinning");
+    try {
+      const res = await post("/api/folder/refresh", { folder: state.folder.name });
+      // Swap the refreshed listing into both the active folder and the shelf.
+      Object.assign(state.folder, res.folder);
+      const idx = state.folders.findIndex((f) => f.name === state.folder.name);
+      if (idx >= 0) state.folders[idx] = state.folder;
+      renderFileList();
+      await checkNewFiles(state.folder.name);
+      const n = res.stats ? res.stats.new_count : 0;
+      toast(n ? `${n} new file${n === 1 ? "" : "s"} found` : "Folder up to date — no new files", "notice");
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      btn.disabled = false; btn.classList.remove("spinning");
+    }
+  }
 
   // ---------- scan ----------
   $("scanBtn").addEventListener("click", () => runScan({}));
   let scanSource = null;
 
-  async function runScan({ incremental = false } = {}) {
+  async function runScan({ incremental = false, autoRemove = false } = {}) {
     const folder = state.folder;
     if (!folder) return;
+    // Snapshot which files to auto-trim before scanning shifts them out of "new".
+    state.pendingAutoRemove = (incremental && autoRemove) ? state.newFiles.slice() : null;
     $("scanBtn").disabled = true;
     $("processNewBtn").disabled = true;
     startScanUI();
@@ -242,6 +301,7 @@
     } catch (e) {
       toast(e.message, "error");
       endScanUI("error", e.message);
+      state.pendingAutoRemove = null;
       $("scanBtn").disabled = false;
       $("processNewBtn").disabled = false;
     }
@@ -289,24 +349,25 @@
     if (ev.detail || ev.message) setScanFile(ev.detail || ev.message);
     if (ev.stage === "fingerprint" || ev.stage === "detect_progress") setScanEta(ev.eta_seconds);
 
-    if (ev.stage === “result”) {
+    if (ev.stage === "result") {
       state.patterns = ev.patterns || [];
       renderPatterns();
-      endScanUI(“complete”);
+      endScanUI("complete");
       const found = (ev.new_patterns || []).length;
       const matched = (ev.matched_patterns || []).length;
       const n = ev.files_scanned || 0;
       const failed = ev.previews_failed || 0;
       if (failed) {
-        toast(`Scanned ${n} file(s) · ${failed} preview${failed === 1 ? “” : “s”} couldn't be built — use “Generate preview” to retry`, “error”);
+        toast(`Scanned ${n} file(s) · ${failed} preview${failed === 1 ? "" : "s"} couldn't be built — use "Generate preview" to retry`, "error");
       } else if (found === 0 && matched > 0) {
         // Incremental (or full scan where confirmed patterns were the only hits)
-        toast(`Processed ${n} file${n === 1 ? “” : “s”} · matched confirmed segments in ${matched} pattern${matched === 1 ? “” : “s”}`, “notice”);
+        toast(`Processed ${n} file${n === 1 ? "" : "s"} · matched confirmed segments in ${matched} pattern${matched === 1 ? "" : "s"}`, "notice");
       } else if (found === 0 && matched === 0) {
-        toast(`Processed ${n} file${n === 1 ? “” : “s”} · no confirmed segments found in these files`, “notice”);
+        toast(`Processed ${n} file${n === 1 ? "" : "s"} · no confirmed segments found in these files`, "notice");
       } else {
-        toast(`Scanned ${n} file${n === 1 ? “” : “s”} · ${found} new segment${found === 1 ? “” : “s”} · ${matched} matched`, “notice”);
+        toast(`Scanned ${n} file${n === 1 ? "" : "s"} · ${found} new segment${found === 1 ? "" : "s"} · ${matched} matched`, "notice");
       }
+      maybeAutoRemove();
     }
   }
 
@@ -645,15 +706,36 @@
     runRemove();
   });
 
+  // After an incremental scan with "Trim after" enabled, trim only the new
+  // files that actually picked up a confirmed ad — never the whole folder.
+  function maybeAutoRemove() {
+    const files = state.pendingAutoRemove;
+    state.pendingAutoRemove = null;
+    if (!files || !files.length) return;
+    const newSet = new Set(files);
+    const targets = new Set();
+    state.patterns.forEach((p) => {
+      if (p.status !== "confirmed") return;
+      p.clips.forEach((c) => { if (newSet.has(c.file_path)) targets.add(c.file_path); });
+    });
+    if (!targets.size) {
+      toast("Nothing to trim — the new files matched no confirmed ads", "notice");
+      return;
+    }
+    toast(`Trimming ${targets.size} new file${targets.size === 1 ? "" : "s"}…`, "notice");
+    $("removePanel").scrollIntoView({ behavior: "smooth", block: "start" });
+    runRemove({ files: [...targets] });
+  }
+
   let removeSource = null;
-  async function runRemove() {
+  async function runRemove({ files = null } = {}) {
     if (!state.patterns.some((p) => p.status === "confirmed")) return;
     const btn = $("removeBtn");
     btn.disabled = true;
     $("removeResults").innerHTML = "";
     startRemoveUI();
     try {
-      await post("/api/remove", { folder: state.folder.name });
+      await post("/api/remove", { folder: state.folder.name, files });
       openRemoveStream();
     } catch (e) {
       toast(e.message, "error");

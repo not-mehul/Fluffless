@@ -260,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_status()
             if path == "/api/folders":
                 return self._api_folders()
+            if path == "/api/folders/stats":
+                return self._api_folders_stats()
             if path == "/api/scan/new":
                 return self._api_scan_new(qs)
             if path == "/api/scan/stream":
@@ -291,6 +293,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_open_library()
             if path == "/api/scan":
                 return self._api_scan()
+            if path == "/api/folder/refresh":
+                return self._api_folder_refresh()
             if path == "/api/pattern/review":
                 return self._api_pattern_review()
             if path == "/api/remove":
@@ -343,9 +347,58 @@ class Handler(BaseHTTPRequestHandler):
     def _api_folders(self) -> None:
         self._json({"folders": [f.to_dict() for f in self.state.folders]})
 
+    def _folder_stats(self, folder) -> dict:
+        """Per-folder review/processing counts for the shelf badges: how much is
+        scanned, awaiting review, confirmed, and already trimmed."""
+        db = self.state.db
+        pats = db.patterns(folder.name)
+        paths = {f.path for f in folder.files}
+        new_count = sum(1 for f in folder.files if not db.has_fingerprint(f.path))
+        processed_paths = {r["file_path"] for r in db.processed()}
+        return {
+            "scanned": len(folder.files) > 0 and new_count < len(folder.files),
+            "new_count": new_count,
+            "pending": sum(1 for p in pats if p["status"] == "pending"),
+            "confirmed": sum(1 for p in pats if p["status"] == "confirmed"),
+            "dismissed": sum(1 for p in pats if p["status"] == "dismissed"),
+            "trimmed": len(paths & processed_paths),
+            "total": len(folder.files),
+        }
+
+    def _api_folders_stats(self) -> None:
+        """Review/processing stats for every folder, keyed by name — the shelf
+        cards use these to show what's scanned, needs review, or is trimmed."""
+        st = self.state
+        if not st.db or not st.library:
+            return self._error("open a library first")
+        self._json({"stats": {f.name: self._folder_stats(f) for f in st.folders}})
+
+    def _api_folder_refresh(self) -> None:
+        """Re-read a folder's files from disk so episodes added since the library
+        was opened show up — without forcing a full library re-open. Returns the
+        refreshed folder and its stats."""
+        st = self.state
+        if not st.db or not st.library:
+            return self._error("open a library first")
+        body = self._body()
+        name = body.get("folder")
+        if not st.folder(name):
+            return self._error(f"unknown folder: {name}", 404)
+        # Re-walk the whole library (probing is cheap next to fingerprinting) and
+        # swap in the fresh listing so both the file list and shelf stay current.
+        st.folders = scan_library(st.library, st.tools)
+        folder = st.folder(name)
+        if not folder:
+            return self._error(f"folder no longer exists: {name}", 404)
+        self._json({
+            "folder": folder.to_dict(),
+            "stats": self._folder_stats(folder),
+        })
+
     def _api_scan_new(self, qs) -> None:
-        """Return how many files in a folder haven't been fingerprinted yet.
-        The UI uses this to decide whether to show the 'Process new files' button."""
+        """Return how many files in a folder haven't been fingerprinted yet, and
+        their paths. The UI uses the count to show the 'Process new files' button
+        and the paths to scope an optional auto-trim to just the new episodes."""
         st = self.state
         if not st.db or not st.library:
             return self._error("open a library first")
@@ -357,6 +410,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({
             "folder": folder_name,
             "new_count": len(new_files),
+            "new_files": [mf.path for mf in new_files],
             "total": len(folder.files),
         })
 
