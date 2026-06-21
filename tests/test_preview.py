@@ -65,6 +65,30 @@ def _has_encoder(tools, name: str) -> bool:
     return name in out
 
 
+def test_remove_segments_mp3_keeps_valid_container():
+    """Trimming an MP3 must produce a valid MP3 (codec matched to container),
+    not AAC forced into an .mp3 — the bug that broke removal."""
+    tools = detect_tools()
+    if not tools.has_ffmpeg or not _has_encoder(tools, "libmp3lame"):
+        return
+    from fluffless.clips import remove_segments
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "ep.mp3")
+        subprocess.run([tools.ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+                        "-i", "sine=frequency=440:duration=20", "-c:a", "libmp3lame", src],
+                       check=True, capture_output=True)
+        out = remove_segments(src, [(5.0, 12.0)], 20.0, os.path.join(d, "out"), tools, "audio")
+        assert out.endswith(".mp3") and os.path.getsize(out) > 0
+        # Output is a real MP3 audio stream and roughly 13s (20 - 7 removed).
+        probe = subprocess.run(
+            [tools.ffprobe, "-v", "error", "-show_entries",
+             "stream=codec_name:format=duration", "-of", "default=nw=1", out],
+            capture_output=True, text=True).stdout
+        assert "codec_name=mp3" in probe
+        dur = float([l for l in probe.splitlines() if l.startswith("duration=")][0].split("=")[1])
+        assert 12.0 < dur < 14.0
+
+
 def test_preview_audio_with_embedded_cover_art():
     """An MP3/M4A with embedded album art must still preview (the cover-art
     video stream is dropped, not forced into an incompatible container)."""

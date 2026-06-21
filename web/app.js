@@ -255,8 +255,9 @@
     const btn = $("scanBtn");
     btn.disabled = true;
     startScanUI();
+    const minLen = Math.max(1, parseFloat($("minLen").value) || 25);
     try {
-      const res = await post("/api/scan", { folder: folder.name, files });
+      const res = await post("/api/scan", { folder: folder.name, files, min_seconds: minLen });
       setScanFile(`${res.total_files} file${res.total_files === 1 ? "" : "s"} queued`);
       openScanStream();
     } catch (e) {

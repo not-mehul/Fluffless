@@ -83,6 +83,8 @@ def scan_folder(
         for row in known:
             if row["bits"] != fp.bits:
                 continue
+            if row["duration"] < base.min_seconds:
+                continue  # honour the minimum-length filter for stored patterns too
             items = db.pattern_items(row)
             hit = locate(items, fp.items, p)
             if hit is None:

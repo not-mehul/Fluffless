@@ -100,6 +100,23 @@ def _complement(segments: list[tuple[float, float]], duration: float) -> list[tu
     return [(s, e) for s, e in keep if e - s > 0.05]
 
 
+def _audio_args(enc: str) -> list[str]:
+    if enc in ("flac", "pcm_s16le"):
+        return ["-c:a", enc]            # lossless / uncompressed take no bitrate
+    return ["-c:a", enc, "-b:a", "192k"]
+
+
+# Source container → (encoder, output extension) for re-encoded output. The trim
+# graph forces a re-encode, and the codec must match the container (AAC cannot
+# live in an .mp3, etc.), which is what broke removal for MP3s.
+_AUDIO_ENC = {
+    ".mp3": ("libmp3lame", ".mp3"),
+    ".m4a": ("aac", ".m4a"), ".m4b": ("aac", ".m4a"), ".aac": ("aac", ".m4a"), ".mp4": ("aac", ".m4a"),
+    ".opus": ("libopus", ".opus"), ".ogg": ("libvorbis", ".ogg"), ".oga": ("libvorbis", ".ogg"),
+    ".flac": ("flac", ".flac"), ".wav": ("pcm_s16le", ".wav"),
+}
+
+
 def remove_segments(
     src: str, segments: list[tuple[float, float]], duration: float,
     out_dir: str, tools: Tools, kind: str | None = None,
@@ -107,24 +124,29 @@ def remove_segments(
     """Write a copy of ``src`` with ``segments`` removed and the rest joined.
 
     Uses ffmpeg's trim/concat filter graph so cuts are frame-accurate and a
-    single output is produced in one pass. Returns the output path.
+    single output is produced in one pass. Because the filter forces a
+    re-encode, the output codec is chosen to fit the container (keeping the
+    source format when possible) with a universal AAC fallback. Returns the
+    output path (its extension may differ from the source if a fallback ran).
     """
     tools.require("ffmpeg")
     os.makedirs(out_dir, exist_ok=True)
     kind = kind or (classify_ext(src) or "audio")
     keep = _complement(segments, duration)
-    out = os.path.join(out_dir, os.path.basename(src))
+    base = os.path.splitext(os.path.basename(src))[0]
+    src_ext = os.path.splitext(src)[1].lower()
 
     if not segments:
         # Nothing to remove — still produce an output copy for a uniform result.
+        out = os.path.join(out_dir, os.path.basename(src))
         run([tools.ffmpeg, "-v", "error", "-y", "-i", src, "-c", "copy", out])
         return out
     if not keep:
         raise ValueError("removing the requested segments would leave nothing")
 
     has_video = kind == "video"
-    parts = []
-    concat_inputs = []
+    parts: list[str] = []
+    concat_inputs: list[str] = []
     n = len(keep)
     for idx, (s, e) in enumerate(keep):
         if has_video:
@@ -141,18 +163,33 @@ def remove_segments(
 
     if has_video:
         graph = ";".join(parts) + ";" + "".join(concat_inputs) + f"concat=n={n}:v=1:a=1[outv][outa]"
-        cmd = [
-            tools.ffmpeg, "-v", "error", "-y", "-i", src,
-            "-filter_complex", graph, "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-movflags", "+faststart", out,
+        maps = ["-map", "[outv]", "-map", "[outa]"]
+        # Always land on .mp4 (H.264/AAC) — valid for any source container.
+        strategies = [
+            (maps + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                     "-c:a", "aac", "-movflags", "+faststart"], ".mp4"),
+            (maps + ["-c:v", "mpeg4", "-q:v", "4", "-c:a", "aac"], ".mp4"),
         ]
     else:
         graph = ";".join(parts) + ";" + "".join(concat_inputs) + f"concat=n={n}:v=0:a=1[outa]"
-        cmd = [
-            tools.ffmpeg, "-v", "error", "-y", "-i", src,
-            "-filter_complex", graph, "-map", "[outa]",
-            "-c:a", "aac", "-b:a", "192k", out,
+        enc, ext = _AUDIO_ENC.get(src_ext, ("aac", ".m4a"))
+        strategies = [
+            (["-map", "[outa]"] + _audio_args(enc), ext),
+            (["-map", "[outa]"] + _audio_args("aac"), ".m4a"),   # universal fallback
         ]
-    run(cmd)
-    return out
+
+    last_error: Exception | None = None
+    for extra, ext in strategies:
+        out = os.path.join(out_dir, base + ext)
+        cmd = [tools.ffmpeg, "-v", "error", "-y", "-i", src,
+               "-filter_complex", graph, *extra, out]
+        try:
+            run(cmd)
+        except Exception as exc:  # noqa: BLE001 — try the next encoder
+            last_error = exc
+            continue
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+    raise RuntimeError(
+        f"could not trim {os.path.basename(src)} — {last_error}"
+    )
