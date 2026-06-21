@@ -412,8 +412,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             job.put({"stage": "fatal", "message": f"{type(exc).__name__}: {exc}"})
         finally:
-            job.put({"stage": "end"})
-            job.finished = True
+            job.finished = True            # set before the sentinel so a
+            job.put({"stage": "end"})  # client that sees "end" can start the next run
 
     def _api_scan_stream(self) -> None:
         """Server-Sent Events feed for the active scan job."""
@@ -562,8 +562,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             job.put({"stage": "fatal", "message": f"{type(exc).__name__}: {exc}"})
         finally:
-            job.put({"stage": "end"})
-            job.finished = True
+            job.finished = True            # set before the sentinel so a
+            job.put({"stage": "end"})  # client that sees "end" can start the next run
 
     def _api_remove_stream(self) -> None:
         """Server-Sent Events feed for the active removal job."""
