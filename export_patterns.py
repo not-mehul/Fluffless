@@ -78,7 +78,7 @@ def export_folder(db: Database, folder, *, include_fp: bool, name_of) -> dict:
             "n_items": len(fp),
         }
         if include_fp:
-            entry["fingerprint"] = fp.items           # the integer stream itself
+            entry["fingerprint"] = list(fp.items)     # coerce array→list for JSON
         files.append(entry)
 
     patterns = []
@@ -101,7 +101,7 @@ def export_folder(db: Database, folder, *, include_fp: bool, name_of) -> dict:
             "clips": clips,
         }
         if include_fp:
-            pat["fingerprint"] = db.pattern_items(prow)
+            pat["fingerprint"] = list(db.pattern_items(prow))
         patterns.append(pat)
 
     return {
