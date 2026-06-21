@@ -78,7 +78,7 @@ def export_folder(db: Database, folder, *, include_fp: bool, name_of) -> dict:
             "n_items": len(fp),
         }
         if include_fp:
-            entry["fingerprint"] = fp.items           # the integer stream itself
+            entry["fingerprint"] = list(fp.items)     # coerce array→list for JSON
         files.append(entry)
 
     patterns = []
@@ -101,7 +101,7 @@ def export_folder(db: Database, folder, *, include_fp: bool, name_of) -> dict:
             "clips": clips,
         }
         if include_fp:
-            pat["fingerprint"] = db.pattern_items(prow)
+            pat["fingerprint"] = list(db.pattern_items(prow))
         patterns.append(pat)
 
     return {
@@ -127,6 +127,47 @@ def _name_mapper(anonymize: bool):
         return seen[base]
 
     return m
+
+
+def _shard_fingerprints(export: dict, base: str, max_bytes: int) -> list[str]:
+    """Pull the bulky per-file fingerprint arrays out of ``export`` and pack them
+    into ``<base>.fpNNN.json`` shards, each kept under ``max_bytes``.
+
+    Each file entry gets an integer ``fp_id``; the shards map that id → items, so
+    a reader loads every shard, merges the maps, and reattaches each array by id.
+    The main JSON (metadata + patterns + clips + file list) stays small and is the
+    one to read first. Pattern fingerprints are tiny (a handful) so they stay in
+    the main file. Returns the list of shard paths written."""
+    entries: list[tuple[int, list[int]]] = []
+    fid = 0
+    for fol in export["folders"]:
+        for f in fol["files"]:
+            if "fingerprint" in f:
+                entries.append((fid, f.pop("fingerprint")))
+                f["fp_id"] = fid
+                fid += 1
+
+    shards: list[dict[str, list[int]]] = []
+    cur: dict[str, list[int]] = {}
+    cur_bytes = 64
+    for fid, items in entries:
+        approx = len(json.dumps(items)) + 16
+        if cur and cur_bytes + approx > max_bytes:
+            shards.append(cur)
+            cur, cur_bytes = {}, 64
+        cur[str(fid)] = items
+        cur_bytes += approx
+    if cur:
+        shards.append(cur)
+
+    paths = []
+    for i, shard in enumerate(shards, 1):
+        p = f"{base}.fp{i:03d}.json"
+        with open(p, "w") as fh:
+            json.dump({"part": i, "of": len(shards), "fingerprints": shard}, fh)
+        paths.append(p)
+    export["fingerprint_parts"] = [os.path.basename(p) for p in paths]
+    return paths
 
 
 def write_markdown(out_json: str, export: dict) -> str:
@@ -172,6 +213,9 @@ def main() -> None:
                     help="replace file names with fileNNN labels")
     ap.add_argument("-o", "--out", default="fluffless_export.json",
                     help="output JSON path (default fluffless_export.json)")
+    ap.add_argument("--max-mb", type=float, default=25.0,
+                    help="if the export exceeds this, split the fingerprints into "
+                         "<out>.fpNNN.json shards each under the limit (default 25)")
     args = ap.parse_args()
 
     tools = detect_tools()
@@ -225,14 +269,25 @@ def main() -> None:
         "folders": out_folders,
     }
 
+    # Split off the fingerprints into shards only if the whole thing would blow
+    # past the limit; otherwise keep a single self-contained file.
+    base = os.path.splitext(args.out)[0]
+    max_bytes = int(args.max_mb * 1e6)
+    shards: list[str] = []
+    if not args.no_fingerprints and len(json.dumps(export)) > max_bytes:
+        shards = _shard_fingerprints(export, base, max_bytes)
+
     with open(args.out, "w") as fh:
         json.dump(export, fh)
     md = write_markdown(args.out, export)
-    size_mb = os.path.getsize(args.out) / 1e6
-    print(f"\nwrote {args.out} ({size_mb:.1f} MB) and {md}")
-    if not args.no_fingerprints and size_mb > 25:
-        print("  (large — re-run with --no-fingerprints if you only need the "
-              "detected timestamps)")
+
+    written = [args.out, md] + shards
+    print(f"\nwrote {len(written)} file(s):")
+    for p in written:
+        print(f"  {p}  ({os.path.getsize(p) / 1e6:.1f} MB)")
+    if shards:
+        print(f"share all {len(written)} — the main JSON references the fp shards "
+              "by name; read it first.")
 
 
 if __name__ == "__main__":

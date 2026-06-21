@@ -189,6 +189,58 @@ def scan_folder(
     return result
 
 
+def absorb_overlapping_pending(
+    db: Database,
+    confirmed_pattern_id: int,
+    overlap_threshold: float = 0.80,
+) -> list[int]:
+    """Dismiss pending patterns whose clips are substantially covered by a
+    newly-confirmed pattern's clips.
+
+    After confirming a pattern and back-applying it, pending patterns that were
+    detecting the same segment — perhaps with slightly different boundaries —
+    are redundant. This auto-dismisses them so the user isn't left with a pile
+    of near-duplicate cards to review manually.
+
+    A pending clip counts as "covered" when the confirmed pattern has a clip in
+    the same file whose time-overlap with the pending clip reaches at least
+    ``overlap_threshold`` of the pending clip's duration.  A pending pattern is
+    absorbed when at least ``overlap_threshold`` of its clips are covered this
+    way.  Only ``pending`` patterns are affected.  Returns absorbed pattern ids.
+    """
+    confirmed_row = db.pattern(confirmed_pattern_id)
+    if confirmed_row is None:
+        return []
+
+    confirmed_by_file: dict[str, list[tuple[float, float]]] = {}
+    for c in db.clips(confirmed_pattern_id):
+        confirmed_by_file.setdefault(c["file_path"], []).append((c["start"], c["end"]))
+    if not confirmed_by_file:
+        return []
+
+    absorbed: list[int] = []
+    for row in db.patterns(confirmed_row["folder"]):
+        if row["id"] == confirmed_pattern_id or row["status"] != "pending":
+            continue
+        pending_clips = db.clips(row["id"])
+        if not pending_clips:
+            continue
+        covered = 0
+        for pc in pending_clips:
+            ps, pe = pc["start"], pc["end"]
+            pending_dur = pe - ps
+            if pending_dur <= 0:
+                continue
+            for cs, ce in confirmed_by_file.get(pc["file_path"], []):
+                if max(0.0, min(pe, ce) - max(ps, cs)) / pending_dur >= overlap_threshold:
+                    covered += 1
+                    break
+        if covered / len(pending_clips) >= overlap_threshold:
+            db.set_status(row["id"], "dismissed")
+            absorbed.append(row["id"])
+    return absorbed
+
+
 def apply_pattern_to_stored(
     db: Database, pattern_id: int, base: DetectParams | None = None,
 ) -> int:

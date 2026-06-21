@@ -25,7 +25,7 @@ from .clips import OUT_DIR, extract_preview, remove_segments
 from .db import STATUSES, Database
 from .media import scan_library
 from .repetition import DetectParams
-from .scan import apply_pattern_to_stored, scan_folder
+from .scan import absorb_overlapping_pending, apply_pattern_to_stored, scan_folder
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 PREVIEW_DIR = "previews"
@@ -485,12 +485,15 @@ class Handler(BaseHTTPRequestHandler):
         # cached file in the folder for every occurrence (locate_all), tagging
         # airings that pre-dated the confirmation. Only on confirm.
         applied = 0
+        absorbed = 0
         if status == "confirmed":
             applied = apply_pattern_to_stored(st.db, int(pid))
+            absorbed = len(absorb_overlapping_pending(st.db, int(pid)))
         self._json({
             "ok": True,
             "status": status,
             "applied_to": applied,
+            "absorbed": absorbed,
             "patterns": patterns_payload(st.db, row["folder"]),
         })
 
