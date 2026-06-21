@@ -17,6 +17,7 @@ import re
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .binaries import detect_tools
@@ -49,6 +50,19 @@ class ScanJob:
         self.previews = 0
         self.previews_failed = 0
         self.detect_started: float | None = None
+        self.finished = False
+
+    def put(self, event: dict) -> None:
+        self.events.put(event)
+
+
+class RemoveJob:
+    """A single in-flight 'Remove the Fluff' run, streamed like a scan."""
+
+    def __init__(self, total_files: int) -> None:
+        self.total_files = total_files
+        self.events: "queue.Queue[dict]" = queue.Queue()
+        self.started = time.time()
         self.finished = False
 
     def put(self, event: dict) -> None:
@@ -151,6 +165,8 @@ class AppState:
         self.lock = threading.Lock()
         self.scan_job: ScanJob | None = None
         self.scan_lock = threading.Lock()
+        self.remove_job: RemoveJob | None = None
+        self.remove_lock = threading.Lock()
         self.workers = max(1, workers)
 
     def open_library(self, path: str) -> dict:
@@ -241,6 +257,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_folders()
             if path == "/api/scan/stream":
                 return self._api_scan_stream()
+            if path == "/api/remove/stream":
+                return self._api_remove_stream()
             if path == "/api/patterns":
                 return self._api_patterns(qs)
             if path == "/api/processed":
@@ -407,9 +425,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_scan_stream(self) -> None:
         """Server-Sent Events feed for the active scan job."""
-        job = self.state.scan_job
+        self._stream_job(self.state.scan_job, "no scan running")
+
+    def _stream_job(self, job, missing: str) -> None:
+        """Generic SSE feed: drain a job's event queue until its ``end``."""
         if not job:
-            return self._error("no scan running", 404)
+            return self._error(missing, 404)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -453,54 +474,108 @@ class Handler(BaseHTTPRequestHandler):
     # --- API: remove the fluff -----------------------------------------------
 
     def _api_remove(self) -> None:
+        """Start a 'Remove the Fluff' run in the background; progress streams
+        over ``/api/remove/stream``."""
         st = self.state
         if not st.db or not st.library:
             return self._error("open a library first")
-        st.tools.require("ffmpeg")
-        body = self._body()
-        folder = st.folder(body.get("folder"))
-        if not folder:
-            return self._error("unknown folder", 404)
-        labels = body.get("labels") or ["Ad"]
-        chosen = set(body.get("files") or [])
+        if not st.tools.has_ffmpeg:
+            return self._error("ffmpeg is not installed", 503)
+        with st.remove_lock:
+            if st.remove_job and not st.remove_job.finished:
+                return self._error("a removal is already running", 409)
 
-        # Gather removal segments per file from clips of matching-label patterns.
-        per_file: dict[str, list[tuple[float, float, str]]] = {}
-        for row in st.db.patterns(folder.name):
-            if row["label"] not in labels:
-                continue
-            for c in st.db.clips(row["id"]):
-                if chosen and c["file_path"] not in chosen:
+            body = self._body()
+            folder = st.folder(body.get("folder"))
+            if not folder:
+                return self._error("unknown folder", 404)
+            labels = body.get("labels") or ["Ad"]
+            chosen = set(body.get("files") or [])
+
+            # Every segment of every matching-label pattern, grouped per file —
+            # so a file with several ads has them all cut in one pass.
+            per_file: dict[str, list[tuple[float, float, str]]] = {}
+            for row in st.db.patterns(folder.name):
+                if row["label"] not in labels:
                     continue
-                per_file.setdefault(c["file_path"], []).append(
-                    (c["start"], c["end"], row["label"])
-                )
+                for c in st.db.clips(row["id"]):
+                    if chosen and c["file_path"] not in chosen:
+                        continue
+                    per_file.setdefault(c["file_path"], []).append(
+                        (c["start"], c["end"], row["label"])
+                    )
+            if not per_file:
+                return self._error("no segments selected to remove")
 
+            try:
+                workers = int(body.get("workers") or st.workers)
+            except (TypeError, ValueError):
+                workers = st.workers
+            job = RemoveJob(len(per_file))
+            st.remove_job = job
+
+        thread = threading.Thread(
+            target=self._run_remove_job, args=(job, folder, per_file, max(1, workers)), daemon=True,
+        )
+        thread.start()
+        self._json({"ok": True, "total_files": len(per_file), "workers": max(1, workers)})
+
+    def _run_remove_job(self, job: RemoveJob, folder, per_file: dict, workers: int) -> None:
+        st = self.state
         out_dir = os.path.join(folder.path, OUT_DIR)
-        results = []
         file_by_path = {f.path: f for f in folder.files}
-        with st.lock:
-            for fpath, segs in per_file.items():
-                mf = file_by_path.get(fpath)
-                duration = mf.duration if mf else _max_end(segs)
-                kind = mf.kind if mf else None
-                ranges = [(s, e) for s, e, _ in segs]
-                try:
-                    out = remove_segments(fpath, ranges, duration, out_dir, st.tools, kind)
-                except Exception as exc:  # noqa: BLE001
-                    results.append({"file": os.path.basename(fpath), "error": str(exc)})
-                    continue
-                saved = sum(e - s for s, e in ranges)
-                removed = [{"start": round(s, 2), "end": round(e, 2), "label": lbl}
-                           for s, e, lbl in segs]
-                st.db.add_processed(fpath, out, removed, saved)
-                results.append({
-                    "file": os.path.basename(fpath),
-                    "output": os.path.relpath(out, folder.path),
-                    "saved_sec": round(saved, 2),
-                    "segments": len(segs),
-                })
-        self._json({"results": results, "out_dir": os.path.relpath(out_dir, st.library)})
+        items = list(per_file.items())
+        total = len(items)
+
+        def work(fpath: str, segs: list):
+            mf = file_by_path.get(fpath)
+            duration = mf.duration if mf else _max_end(segs)
+            kind = mf.kind if mf else None
+            ranges = sorted((s, e) for s, e, _ in segs)
+            out = remove_segments(fpath, ranges, duration, out_dir, st.tools, kind)
+            saved = sum(e - s for s, e in ranges)
+            return out, saved
+
+        results: list[dict] = []
+        done = 0
+        job.put({"stage": "start", "percent": 0.0, "total": total,
+                 "message": f"Trimming {total} file(s)"})
+        try:
+            with ThreadPoolExecutor(max_workers=min(workers, total)) as ex:
+                futures = {ex.submit(work, fp, segs): (fp, segs) for fp, segs in items}
+                for fut in as_completed(futures):
+                    fpath, segs = futures[fut]
+                    name = os.path.basename(fpath)
+                    done += 1
+                    try:
+                        out, saved = fut.result()
+                        st.db.add_processed(
+                            fpath, out,
+                            [{"start": round(s, 2), "end": round(e, 2), "label": l} for s, e, l in segs],
+                            saved,
+                        )
+                        res = {"file": name, "output": os.path.relpath(out, folder.path),
+                               "saved_sec": round(saved, 2), "segments": len(segs)}
+                        msg = f"Trimmed {name}"
+                    except Exception as exc:  # noqa: BLE001
+                        res = {"file": name, "error": str(exc)}
+                        msg = f"Failed: {name}"
+                    results.append(res)
+                    job.put({"stage": "file", "percent": round(done / total * 100, 1),
+                             "done": done, "total": total, "message": msg, "result": res})
+            ok = sum(1 for r in results if "error" not in r)
+            job.put({"stage": "result", "percent": 100.0,
+                     "message": f"Removed fluff from {ok}/{total} file(s)",
+                     "results": results, "out_dir": os.path.relpath(out_dir, st.library)})
+        except Exception as exc:  # noqa: BLE001
+            job.put({"stage": "fatal", "message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            job.put({"stage": "end"})
+            job.finished = True
+
+    def _api_remove_stream(self) -> None:
+        """Server-Sent Events feed for the active removal job."""
+        self._stream_job(self.state.remove_job, "no removal running")
 
     def _api_make_preview(self) -> None:
         """(Re)build a preview clip on demand for a stored clip."""

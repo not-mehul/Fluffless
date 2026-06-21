@@ -445,10 +445,8 @@
     });
     el.querySelector(".trim-apply").addEventListener("click", () => applyPatternTrim(p, el));
     el.querySelectorAll(".preview-btn").forEach((b) => {
-      b.addEventListener("click", () => playClip(b, p));
-    });
-    el.querySelectorAll(".gen-btn").forEach((b) => {
-      b.addEventListener("click", () => generatePreview(b));
+      const clip = p.clips.find((c) => c.id === Number(b.dataset.clip));
+      b.addEventListener("click", () => playClip(b, clip));
     });
     el.querySelectorAll(".adjust-btn").forEach((b) => {
       const clip = p.clips.find((c) => c.id === Number(b.dataset.clip));
@@ -459,14 +457,11 @@
 
   function renderClip(c) {
     const range = `${fmtDur(c.start)}–${fmtDur(c.end)}`;
-    const action = c.has_preview
-      ? `<button class="preview-btn" data-clip="${c.id}">▸ Preview</button>`
-      : `<button class="preview-btn gen-btn" data-clip="${c.id}">Generate preview</button>`;
     return `
       <div class="clip" data-clip="${c.id}">
         <span class="clip-info"><span class="cfile">${escapeHtml(c.file_name)}</span> · <span class="crange">${range}</span></span>
         <div class="clip-actions">
-          ${action}
+          <button class="preview-btn" data-clip="${c.id}">▸ Preview</button>
           <button class="adjust-btn" data-clip="${c.id}" title="Adjust this clip's boundaries">✎</button>
         </div>
         <div class="clip-media" data-media="${c.id}"></div>
@@ -572,39 +567,23 @@
     }));
   }
 
-  async function generatePreview(btn) {
-    const clipId = btn.dataset.clip;
-    const prev = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = "Generating…";
-    try {
-      await post("/api/preview", { clip_id: Number(clipId) });
-      // Mark the clip as having a preview and turn this into a Play button.
-      state.patterns.forEach((p) => p.clips.forEach((c) => {
-        if (c.id === Number(clipId)) c.has_preview = true;
-      }));
-      btn.classList.remove("gen-btn");
-      btn.disabled = false;
-      btn.textContent = "▸ Preview";
-      btn.replaceWith(btn.cloneNode(true)); // drop old listener
-      const fresh = document.querySelector(`.preview-btn[data-clip="${clipId}"]`);
-      if (fresh) fresh.addEventListener("click", () => playClip(fresh, null));
-    } catch (e) {
-      btn.disabled = false;
-      btn.textContent = prev;
-      toast(e.message, "error");
-    }
-  }
-
-  function playClip(btn, pattern) {
-    const clipId = btn.dataset.clip;
+  async function playClip(btn, c) {
     const slot = btn.closest(".clip").querySelector(".clip-media");
     if (slot.dataset.loaded) {
       slot.innerHTML = ""; delete slot.dataset.loaded; btn.textContent = "▸ Preview"; return;
     }
-    const isVideo = state.folder && state.folder.kind === "video";
-    const tag = isVideo ? "video" : "audio";
-    slot.innerHTML = `<${tag} controls autoplay src="/api/preview/${clipId}"></${tag}>`;
+    if (c && !c.has_preview) {                 // build it on first play — no separate button
+      btn.disabled = true; btn.textContent = "Generating…";
+      try {
+        await post("/api/preview", { clip_id: c.id });
+        c.has_preview = true; updateClipInState(c.id, c.start, c.end, true);
+      } catch (e) {
+        toast(e.message, "error"); btn.disabled = false; btn.textContent = "▸ Preview"; return;
+      }
+      btn.disabled = false;
+    }
+    const tag = state.folder && state.folder.kind === "video" ? "video" : "audio";
+    slot.innerHTML = `<${tag} controls autoplay src="/api/preview/${c.id}?t=${Date.now()}"></${tag}>`;
     slot.dataset.loaded = "1";
     btn.textContent = "▾ Hide";
   }
@@ -683,33 +662,101 @@
     runRemove();
   });
 
+  let removeSource = null;
   async function runRemove() {
     const labels = [...state.removeLabels];
     if (!labels.length) return;
     const btn = $("removeBtn");
     btn.disabled = true;
+    $("removeResults").innerHTML = "";
+    startRemoveUI();
     try {
-      const res = await post("/api/remove", { folder: state.folder.name, labels });
-      renderRemoveResults(res.results);
-      const saved = res.results.reduce((s, r) => s + (r.saved_sec || 0), 0);
-      toast(`Trimmed ${res.results.length} file(s) · saved ${fmtDur(saved)}`, "notice");
-      refreshProcessed();
+      await post("/api/remove", { folder: state.folder.name, labels });
+      openRemoveStream();
     } catch (e) {
       toast(e.message, "error");
-    } finally {
+      endRemoveUI("error", e.message);
       btn.disabled = false;
     }
   }
 
-  function renderRemoveResults(results) {
+  function openRemoveStream() {
+    if (removeSource) { removeSource.close(); removeSource = null; }
+    state.removeDone = false;
+    removeSource = new EventSource("/api/remove/stream");
+    removeSource.onmessage = (e) => {
+      let ev; try { ev = JSON.parse(e.data); } catch { return; }
+      handleRemoveEvent(ev);
+    };
+    removeSource.onerror = () => {
+      if (state.removeDone) return;
+      if (removeSource) { removeSource.close(); removeSource = null; }
+      toast("Progress stream lost — removal may still be running", "error");
+      $("removeBtn").disabled = false;
+      refreshProcessed();
+    };
+  }
+
+  function handleRemoveEvent(ev) {
+    if (ev.stage === "end") {
+      state.removeDone = true;
+      if (removeSource) { removeSource.close(); removeSource = null; }
+      $("removeBtn").disabled = false;
+      return;
+    }
+    if (ev.stage === "fatal") {
+      toast(ev.message || "Removal failed", "error");
+      endRemoveUI("error", ev.message);
+      return;
+    }
+    if (typeof ev.percent === "number") {
+      $("removeBar").querySelector(".bar").style.width = Math.min(100, ev.percent) + "%";
+      $("removePct").textContent = Math.round(ev.percent) + "%";
+    }
+    if (ev.message) $("removeFile").textContent = ev.message;
+    if (ev.stage === "file" && ev.result) appendRemoveResult(ev.result);
+    if (ev.stage === "result") {
+      endRemoveUI("complete");
+      const saved = (ev.results || []).reduce((s, r) => s + (r.saved_sec || 0), 0);
+      const failed = (ev.results || []).filter((r) => r.error).length;
+      toast(failed
+        ? `${ev.message} · ${failed} failed · saved ${fmtDur(saved)}`
+        : `${ev.message} · saved ${fmtDur(saved)} → ${ev.out_dir}`,
+        failed ? "error" : "notice");
+      refreshProcessed();
+    }
+  }
+
+  function startRemoveUI() {
+    const box = $("removeStatus");
+    box.classList.remove("hidden", "complete", "error");
+    $("removeStage").textContent = "Trimming";
+    $("removePct").textContent = "0%";
+    $("removeBar").querySelector(".bar").style.width = "0%";
+    $("removeFile").textContent = "";
+  }
+  function endRemoveUI(kind, msg) {
+    const box = $("removeStatus");
+    if (kind === "complete") {
+      box.classList.add("complete");
+      $("removeStage").textContent = "Complete";
+      $("removePct").textContent = "100%";
+      $("removeBar").querySelector(".bar").style.width = "100%";
+    } else if (kind === "error") {
+      box.classList.add("error");
+      $("removeStage").textContent = "Failed";
+      if (msg) $("removeFile").textContent = msg;
+    }
+    $("removeBtn").disabled = false;
+  }
+  function appendRemoveResult(r) {
     const wrap = $("removeResults");
-    if (!results || !results.length) { wrap.innerHTML = ""; return; }
-    wrap.innerHTML = results.map((r) =>
-      r.error
-        ? `<div class="remove-result"><span class="err">✕ ${escapeHtml(r.file)}</span><span>${escapeHtml(r.error)}</span></div>`
-        : `<div class="remove-result"><span class="ok">✓ ${escapeHtml(r.file)}</span>
-           <span>saved ${fmtDur(r.saved_sec)} · ${r.segments} cut → ${escapeHtml(r.output)}</span></div>`
-    ).join("");
+    const div = document.createElement("div");
+    div.className = "remove-result";
+    div.innerHTML = r.error
+      ? `<span class="err">✕ ${escapeHtml(r.file)}</span><span>${escapeHtml(r.error)}</span>`
+      : `<span class="ok">✓ ${escapeHtml(r.file)}</span><span>saved ${fmtDur(r.saved_sec)} · ${r.segments} cut → ${escapeHtml(r.output)}</span>`;
+    wrap.appendChild(div);
   }
 
   // ---------- export & processed ----------
