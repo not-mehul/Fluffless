@@ -214,12 +214,16 @@ body { transition: background 0.3s; }
 .btn-primary:disabled { background: var(--disabled-bg); color: var(--text-faint); box-shadow: none; cursor: not-allowed; }
 
 .btn-ghost {
+  display: inline-flex; align-items: center; gap: 0.4rem;
   background: transparent; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 2px; cursor: pointer; font-family: var(--sans);
   text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.75rem;
   padding: 0.5rem 0.9rem; transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 .btn-ghost:hover { color: var(--text-heading); background: var(--hover-bg); }
+.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.scan-btn-group { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
 
 .btn-danger {
   display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;

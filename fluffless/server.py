@@ -260,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_status()
             if path == "/api/folders":
                 return self._api_folders()
+            if path == "/api/scan/new":
+                return self._api_scan_new(qs)
             if path == "/api/scan/stream":
                 return self._api_scan_stream()
             if path == "/api/remove/stream":
@@ -341,11 +343,32 @@ class Handler(BaseHTTPRequestHandler):
     def _api_folders(self) -> None:
         self._json({"folders": [f.to_dict() for f in self.state.folders]})
 
+    def _api_scan_new(self, qs) -> None:
+        """Return how many files in a folder haven't been fingerprinted yet.
+        The UI uses this to decide whether to show the 'Process new files' button."""
+        st = self.state
+        if not st.db or not st.library:
+            return self._error("open a library first")
+        folder_name = (qs.get("folder") or [None])[0]
+        folder = st.folder(folder_name)
+        if not folder:
+            return self._error(f"unknown folder: {folder_name}", 404)
+        new_files = [mf for mf in folder.files if not st.db.has_fingerprint(mf.path)]
+        self._json({
+            "folder": folder_name,
+            "new_count": len(new_files),
+            "total": len(folder.files),
+        })
+
     # --- API: scan (non-blocking, with a streamed progress feed) -------------
 
     def _api_scan(self) -> None:
         """Start a scan in the background and return immediately. Progress is
-        delivered over the SSE endpoint ``/api/scan/stream``."""
+        delivered over the SSE endpoint ``/api/scan/stream``.
+
+        When ``incremental`` is True in the request body, only files not yet
+        fingerprinted are processed and cross-file recurrence is skipped.  This
+        is the fast path for applying confirmed patterns to newly added episodes."""
         st = self.state
         if not st.db or not st.library:
             return self._error("open a library first")
@@ -358,11 +381,12 @@ class Handler(BaseHTTPRequestHandler):
             if not folder:
                 return self._error(f"unknown folder: {body.get('folder')}", 404)
 
-            chosen = body.get("files")  # optional subset for a partial scan
+            incremental = bool(body.get("incremental"))
             files = folder.files
-            if chosen:
-                wanted = set(chosen)
-                files = [f for f in folder.files if f.path in wanted]
+            if incremental:
+                files = [mf for mf in files if not st.db.has_fingerprint(mf.path)]
+                if not files:
+                    return self._error("no new files found — all files have already been scanned", 409)
             if not files:
                 return self._error("no files selected")
 
@@ -376,12 +400,20 @@ class Handler(BaseHTTPRequestHandler):
             st.scan_job = job
 
         thread = threading.Thread(
-            target=self._run_scan_job, args=(job, folder, files, params, workers), daemon=True,
+            target=self._run_scan_job,
+            args=(job, folder, files, params, workers, incremental),
+            daemon=True,
         )
         thread.start()
-        self._json({"ok": True, "folder": folder.name, "total_files": len(files), "workers": workers})
+        self._json({
+            "ok": True, "folder": folder.name,
+            "total_files": len(files), "workers": workers, "incremental": incremental,
+        })
 
-    def _run_scan_job(self, job: ScanJob, folder, files, params, workers: int = 1) -> None:
+    def _run_scan_job(
+        self, job: ScanJob, folder, files, params,
+        workers: int = 1, incremental: bool = False,
+    ) -> None:
         """Worker thread: runs the scan, pushing enriched progress events into
         the job queue, then a final ``result`` event and an ``end`` sentinel."""
         st = self.state
@@ -397,7 +429,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = scan_folder(
                     st.db, st.library, folder.name, files, st.tools,
                     params=params, progress=progress, make_preview=None,
-                    workers=workers,
+                    workers=workers, incremental=incremental,
                 )
             job.put({
                 "stage": "result",

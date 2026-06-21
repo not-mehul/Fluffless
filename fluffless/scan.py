@@ -103,7 +103,16 @@ def scan_folder(
     progress: ProgressFn | None = None,
     make_preview: Callable[[MediaFile, float, float], str | None] | None = None,
     workers: int = 1,
+    incremental: bool = False,
 ) -> ScanResult:
+    """Scan a set of files.
+
+    When ``incremental`` is True the caller has pre-filtered ``files`` to those
+    not yet fingerprinted, and cross-file recurrence (step 3) is skipped — we
+    only need to fingerprint the new files and match *confirmed* patterns against
+    them.  This is the fast path for "I downloaded a new episode; apply what I
+    already know."
+    """
     base = params or DetectParams()
     result = ScanResult(folder=folder)
 
@@ -145,40 +154,43 @@ def scan_folder(
                       start=start, end=end)
 
     # 3. Cross-file recurrence over the batch (group by bit-width).
-    by_bits: dict[int, list[tuple[MediaFile, Fingerprint]]] = {}
-    for mf, fp in prints:
-        by_bits.setdefault(fp.bits, []).append((mf, fp))
+    #    Skipped in incremental mode: we're only applying *known* patterns to
+    #    new files, not discovering new recurring segments.
+    if not incremental:
+        by_bits: dict[int, list[tuple[MediaFile, Fingerprint]]] = {}
+        for mf, fp in prints:
+            by_bits.setdefault(fp.bits, []).append((mf, fp))
 
-    for bits, group in by_bits.items():
-        if len(group) < base.min_shows:
-            continue  # need at least min_shows files to recur against
-        p = base.scaled(bits)
-        _emit(progress, stage="detect", count=len(group))
+        for bits, group in by_bits.items():
+            if len(group) < base.min_shows:
+                continue  # need at least min_shows files to recur against
+            p = base.scaled(bits)
+            _emit(progress, stage="detect", count=len(group))
 
-        def _det_progress(done: int, total: int) -> None:
-            _emit(progress, stage="detect_progress", done=done, total=total)
+            def _det_progress(done: int, total: int) -> None:
+                _emit(progress, stage="detect_progress", done=done, total=total)
 
-        segs_per_file = recurring_segments(
-            [fp for _, fp in group], p, on_progress=_det_progress, workers=workers,
-        )
-        for (mf, fp), segs in zip(group, segs_per_file):  # noqa: B905
-            for start, end in segs:
-                pid = _store_segment(db, library, folder, mf, fp, start, end, p, make_preview)
-                if pid is None:
-                    continue
-                if pid not in result.new_patterns and pid not in result.matched_patterns:
-                    result.new_patterns.append(pid)
-                result.clips_added += 1
-                _emit(progress, stage="found", file=mf.name, pattern_id=pid,
-                      start=start, end=end)
+            segs_per_file = recurring_segments(
+                [fp for _, fp in group], p, on_progress=_det_progress, workers=workers,
+            )
+            for (mf, fp), segs in zip(group, segs_per_file):  # noqa: B905
+                for start, end in segs:
+                    pid = _store_segment(db, library, folder, mf, fp, start, end, p, make_preview)
+                    if pid is None:
+                        continue
+                    if pid not in result.new_patterns and pid not in result.matched_patterns:
+                        result.new_patterns.append(pid)
+                    result.clips_added += 1
+                    _emit(progress, stage="found", file=mf.name, pattern_id=pid,
+                          start=start, end=end)
 
-    # Normalise lengths: re-locate every new pattern's clips against its
-    # canonical fingerprint, so the *same ad* gets the *same length* in every
-    # file (the cross-file recurrence boundaries vary; the fingerprint does not).
-    if result.new_patterns:
-        fp_by_path = {mf.path: fp for mf, fp in prints}
-        _emit(progress, stage="normalize", count=len(result.new_patterns))
-        _normalize_pattern_lengths(db, result.new_patterns, fp_by_path, base)
+        # Normalise lengths: re-locate every new pattern's clips against its
+        # canonical fingerprint, so the *same ad* gets the *same length* in every
+        # file (the cross-file recurrence boundaries vary; the fingerprint does not).
+        if result.new_patterns:
+            fp_by_path = {mf.path: fp for mf, fp in prints}
+            _emit(progress, stage="normalize", count=len(result.new_patterns))
+            _normalize_pattern_lengths(db, result.new_patterns, fp_by_path, base)
 
     _emit(progress, stage="done", **{
         "files": result.files_scanned,

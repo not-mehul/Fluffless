@@ -167,7 +167,7 @@
     $("wsTitle").textContent = folder.name;
     $("wsMarker").textContent = folder.kind === "video" ? "Video." : "Audio.";
     renderFileList();
-    await Promise.all([loadPatterns(), refreshProcessed()]);
+    await Promise.all([loadPatterns(), refreshProcessed(), checkNewFiles(name)]);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -205,25 +205,45 @@
     applyFilesCollapsed();
   }
 
+  // ---------- new-files check ----------
+  async function checkNewFiles(folderName) {
+    try {
+      const res = await api(`/api/scan/new?folder=${encodeURIComponent(folderName)}`);
+      const btn = $("processNewBtn");
+      const label = btn.querySelector(".btn-label");
+      if (res.new_count > 0) {
+        label.textContent = `Process ${res.new_count} new file${res.new_count === 1 ? "" : "s"}`;
+        btn.classList.remove("hidden");
+        $("scanHint").innerHTML = `<em>New files.</em> ${res.new_count} file${res.new_count === 1 ? "" : "s"} added since the last scan. Process just these to apply confirmed patterns — or run a full scan to also discover new segments.`;
+      } else {
+        btn.classList.add("hidden");
+        $("scanHint").innerHTML = `<em>Scan.</em> Fingerprints every file and finds the segments that recur across the folder.`;
+      }
+    } catch (_) { /* non-fatal */ }
+  }
+
+  $("processNewBtn").addEventListener("click", () => runScan({ incremental: true }));
+
   // ---------- scan ----------
-  $("scanBtn").addEventListener("click", runScan);
+  $("scanBtn").addEventListener("click", () => runScan({}));
   let scanSource = null;
 
-  async function runScan() {
+  async function runScan({ incremental = false } = {}) {
     const folder = state.folder;
     if (!folder) return;
-    const btn = $("scanBtn");
-    btn.disabled = true;
+    $("scanBtn").disabled = true;
+    $("processNewBtn").disabled = true;
     startScanUI();
     const minLen = Math.max(1, parseFloat($("minLen").value) || 25);
     try {
-      const res = await post("/api/scan", { folder: folder.name, files: null, min_seconds: minLen });
+      const res = await post("/api/scan", { folder: folder.name, files: null, min_seconds: minLen, incremental });
       setScanFile(`${res.total_files} file${res.total_files === 1 ? "" : "s"} queued`);
       openScanStream();
     } catch (e) {
       toast(e.message, "error");
       endScanUI("error", e.message);
-      btn.disabled = false;
+      $("scanBtn").disabled = false;
+      $("processNewBtn").disabled = false;
     }
   }
 
@@ -269,17 +289,23 @@
     if (ev.detail || ev.message) setScanFile(ev.detail || ev.message);
     if (ev.stage === "fingerprint" || ev.stage === "detect_progress") setScanEta(ev.eta_seconds);
 
-    if (ev.stage === "result") {
+    if (ev.stage === “result”) {
       state.patterns = ev.patterns || [];
       renderPatterns();
-      endScanUI("complete");
+      endScanUI(“complete”);
       const found = (ev.new_patterns || []).length;
       const matched = (ev.matched_patterns || []).length;
+      const n = ev.files_scanned || 0;
       const failed = ev.previews_failed || 0;
       if (failed) {
-        toast(`Scanned ${ev.files_scanned} file(s) · ${failed} preview${failed === 1 ? "" : "s"} couldn't be built — use “Generate preview” to retry`, "error");
+        toast(`Scanned ${n} file(s) · ${failed} preview${failed === 1 ? “” : “s”} couldn't be built — use “Generate preview” to retry`, “error”);
+      } else if (found === 0 && matched > 0) {
+        // Incremental (or full scan where confirmed patterns were the only hits)
+        toast(`Processed ${n} file${n === 1 ? “” : “s”} · matched confirmed segments in ${matched} pattern${matched === 1 ? “” : “s”}`, “notice”);
+      } else if (found === 0 && matched === 0) {
+        toast(`Processed ${n} file${n === 1 ? “” : “s”} · no confirmed segments found in these files`, “notice”);
       } else {
-        toast(`Scanned ${ev.files_scanned} file(s) · ${found} new · ${matched} matched`, "notice");
+        toast(`Scanned ${n} file${n === 1 ? “” : “s”} · ${found} new segment${found === 1 ? “” : “s”} · ${matched} matched`, “notice”);
       }
     }
   }
@@ -288,6 +314,8 @@
     state.scanDone = true;
     if (scanSource) { scanSource.close(); scanSource = null; }
     $("scanBtn").disabled = false;
+    $("processNewBtn").disabled = false;
+    if (state.folder) checkNewFiles(state.folder.name);
   }
 
   // --- scan progress UI helpers ---
