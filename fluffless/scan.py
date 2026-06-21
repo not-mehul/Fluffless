@@ -37,6 +37,12 @@ from .repetition import (
 
 ProgressFn = Callable[[dict], None]
 
+# Two occurrences belong to the same pattern only if they are the *same audio* —
+# which means a similar length. Without this, a short ad whose fingerprint is
+# contained in a longer "two ads back-to-back" segment gets merged into it, so a
+# single pattern ends up mixing 74s and 143s clips.
+LENGTH_TOL = 0.20
+
 
 @dataclass
 class ScanResult:
@@ -182,10 +188,17 @@ def _store_segment(
     items = fp.slice_seconds(start, end)
     if not items:
         return None
+    seg_dur = end - start
 
     match_id = None
     for row in db.patterns(folder):
         if row["bits"] != fp.bits:
+            continue
+        # Same audio ⇒ similar length. Skip patterns whose duration differs too
+        # much, so a short ad isn't absorbed into a longer combined segment.
+        pdur = row["duration"]
+        longer = max(seg_dur, pdur)
+        if longer > 0 and abs(seg_dur - pdur) / longer > LENGTH_TOL:
             continue
         if best_ratio(items, db.pattern_items(row), p) >= p.dedupe_ratio:
             match_id = row["id"]

@@ -161,21 +161,27 @@ def remove_segments(
             )
             concat_inputs.append(f"[a{idx}]")
 
+    # Carry the source's tags (title/artist/album/…) onto the trimmed copy.
+    meta = ["-map_metadata", "0"]
     if has_video:
         graph = ";".join(parts) + ";" + "".join(concat_inputs) + f"concat=n={n}:v=1:a=1[outv][outa]"
         maps = ["-map", "[outv]", "-map", "[outa]"]
         # Always land on .mp4 (H.264/AAC) — valid for any source container.
         strategies = [
-            (maps + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                     "-c:a", "aac", "-movflags", "+faststart"], ".mp4"),
-            (maps + ["-c:v", "mpeg4", "-q:v", "4", "-c:a", "aac"], ".mp4"),
+            (maps + meta + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                            "-c:a", "aac", "-movflags", "+faststart"], ".mp4"),
+            (maps + meta + ["-c:v", "mpeg4", "-q:v", "4", "-c:a", "aac"], ".mp4"),
         ]
     else:
         graph = ";".join(parts) + ";" + "".join(concat_inputs) + f"concat=n={n}:v=0:a=1[outa]"
         enc, ext = _AUDIO_ENC.get(src_ext, ("aac", ".m4a"))
+        # Keep embedded cover art (a still attached-pic stream) by copying it
+        # through, alongside the re-stitched audio and the metadata.
+        cover = ["-map", "0:v:0?", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
         strategies = [
-            (["-map", "[outa]"] + _audio_args(enc), ext),
-            (["-map", "[outa]"] + _audio_args("aac"), ".m4a"),   # universal fallback
+            (["-map", "[outa]"] + cover + meta + _audio_args(enc), ext),
+            (["-map", "[outa]"] + meta + _audio_args(enc), ext),          # drop cover if it choked
+            (["-map", "[outa]"] + meta + _audio_args("aac"), ".m4a"),     # universal fallback
         ]
 
     last_error: Exception | None = None
