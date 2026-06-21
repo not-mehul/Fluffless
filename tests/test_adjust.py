@@ -57,7 +57,7 @@ def test_propagate_from_clip_applies_same_trim_to_all():
     import tempfile as _tf
     with _tf.TemporaryDirectory() as root:
         db = Database.open(root)
-        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0, "Ad")
+        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0)
         a = db.add_clip(pid, "/x/ep1.mp3", 10.0, 14.0)
         b = db.add_clip(pid, "/x/ep2.mp3", 22.0, 26.0)
         c = db.add_clip(pid, "/x/ep3.mp3", 5.0, 9.0)
@@ -78,7 +78,7 @@ def test_set_fingerprint_from_clip_pins_cropped_region():
     with tempfile.TemporaryDirectory() as root:
         db = Database.open(root)
         # Pattern detected as a long 4.0s segment, but the real ad is a sub-span.
-        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0, "Ad")
+        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0)
         db.store_fingerprint(
             "/x/ep1.mp3", "Show",
             Fingerprint(items=list(range(100)), item_sec=0.1, bits=32),
@@ -126,8 +126,8 @@ def test_reset_clip_restores_detected_bounds():
 def test_move_clip_between_groups_and_recounts():
     with tempfile.TemporaryDirectory() as root:
         db = Database.open(root)
-        a = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0, "Ad")
-        b = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0, "Intro")
+        a = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0)
+        b = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0)
         db.add_clip(a, "/x/ep1.mp3", 1.0, 3.0)
         c2 = db.add_clip(a, "/x/ep2.mp3", 1.0, 3.0)
 
@@ -154,7 +154,7 @@ def test_move_last_clip_deletes_empty_source():
 def test_new_group_from_clip_splits_out():
     with tempfile.TemporaryDirectory() as root:
         db = Database.open(root)
-        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0, "Ad")
+        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0)
         db.store_fingerprint(
             "/x/ep2.mp3", "Show",
             Fingerprint(items=list(range(100)), item_sec=0.1, bits=32),
@@ -162,12 +162,12 @@ def test_new_group_from_clip_splits_out():
         db.add_clip(pid, "/x/ep1.mp3", 1.0, 5.0)
         c2 = db.add_clip(pid, "/x/ep2.mp3", 2.0, 4.0)
 
-        res = db.new_group_from_clip(c2, label="Intro")
+        res = db.new_group_from_clip(c2, status="pending")
         new_id = res["new_pattern_id"]
         assert new_id != pid and res["deleted_source"] is False
         assert db.clip(c2)["pattern_id"] == new_id
         new_row = db.pattern(new_id)
-        assert new_row["label"] == "Intro" and new_row["pinned"] == 1
+        assert new_row["status"] == "pending" and new_row["pinned"] == 1
         assert db.pattern_items(new_row) == list(range(20, 40))   # items[20:40]
         assert db.pattern(pid)["shows"] == 1                      # source recounted
         db.close()

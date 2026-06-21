@@ -33,8 +33,9 @@
         </button>
       </div>
       <h1 class="page-title">Fluff<span class="accent-i">less</span></h1>
-      <p class="lede">Point it at a folder of media. It finds the repeated stretches —
-        the ads, the intros, the outros — and lets you cut them out.</p>
+      <p class="lede">Point it at a folder of media. It finds the stretches that repeat
+        across your files, you confirm which are ads, and it cuts every occurrence —
+        even the ones that air more than once.</p>
     </header>
 
     <!-- Library picker -->
@@ -117,7 +118,7 @@
 
         <div class="control-foot">
           <p class="hint" id="scanHint"><em>Scan.</em> Fingerprints each file, finds segments
-            that recur across the set, and matches anything already catalogued.</p>
+            that recur across the set, and re-finds anything you've already confirmed.</p>
           <button class="btn-primary" id="scanBtn">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
@@ -136,13 +137,16 @@
         </div>
       </div>
 
-      <!-- Duplicates / patterns -->
+      <!-- Duplicates / review -->
       <div class="subsection">
         <div class="section-head">
-          <span class="marker">Duplicates.</span>
+          <span class="marker">Review.</span>
           <h3 class="section-subtitle">Recurring segments found</h3>
           <span class="count-chip head-chip hidden" id="dupCount"></span>
         </div>
+        <p class="hint">Each card is one segment that repeats across your files, with every
+          occurrence listed beneath it. Play it, then decide: <em>Mark as ad</em> approves it
+          for removal; <em>Not an ad</em> sets it aside.</p>
         <div id="patternsList"></div>
       </div>
 
@@ -152,9 +156,9 @@
           <span class="marker">Trim.</span>
           <h3 class="section-subtitle">Remove the fluff</h3>
         </div>
-        <p class="hint">Choose which catalogued segments to cut. The originals are never
-          touched — trimmed copies land in <span class="mono">_fluffless_out</span>.</p>
-        <div class="check-grid" id="removeLabels"></div>
+        <p class="hint">Every segment you've confirmed as an ad will be cut from every file it
+          occurs in. The originals are never touched — trimmed copies land in
+          <span class="mono">_fluffless_out</span>.</p>
         <div class="control-foot">
           <span class="meta-note" id="removeSummary"></span>
           <button class="btn-danger" id="removeBtn">

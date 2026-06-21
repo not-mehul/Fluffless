@@ -3,8 +3,9 @@
 Everything the tool learns lives on-device in a SQLite file inside the library
 (``<library>/.fluffless/fluffless.db``). Three record types:
 
-  * **patterns** — a stored fingerprint slice + label (Ad/Intro/Outro/Other),
-    the durable knowledge that survives across runs.
+  * **patterns** — a stored fingerprint slice + review status (pending until the
+    user decides; confirmed once marked an ad and approved for removal; or
+    dismissed), the durable knowledge that survives across runs.
   * **clips**    — a concrete occurrence of a pattern in one file, with its
     timestamps and an extracted preview, so it can be played back in-tool.
   * **processed** — which files the "Remove the Fluff" step has already run on,
@@ -25,7 +26,11 @@ from dataclasses import dataclass
 
 from .repetition import Fingerprint
 
-LABELS = ("Ad", "Intro", "Outro", "Other")
+# Review lifecycle of a detected segment. Detection only proposes (``pending``);
+# the user decides. Marking something an ad ``confirmed``s it and approves it for
+# removal; ``dismissed`` segments are kept (so they aren't re-proposed) but never
+# cut. This replaces the old Ad/Intro/Outro/Other taxonomy entirely.
+STATUSES = ("pending", "confirmed", "dismissed")
 WORKSPACE = ".fluffless"
 DB_NAME = "fluffless.db"
 
@@ -34,7 +39,7 @@ CREATE TABLE IF NOT EXISTS patterns (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     library     TEXT NOT NULL,
     folder      TEXT NOT NULL,
-    label       TEXT NOT NULL DEFAULT 'Other',
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | confirmed | dismissed
     bits        INTEGER NOT NULL,
     item_sec    REAL NOT NULL,
     items       TEXT NOT NULL,          -- JSON array of fingerprint integers (current/effective base)
@@ -67,7 +72,7 @@ CREATE TABLE IF NOT EXISTS processed (
     file_path   TEXT NOT NULL,
     file_name   TEXT NOT NULL,
     output_path TEXT,
-    removed     TEXT,                   -- JSON: list of removed [start,end,label]
+    removed     TEXT,                   -- JSON: list of removed [start,end]
     saved_sec   REAL NOT NULL DEFAULT 0,
     created_at  REAL NOT NULL
 );
@@ -131,6 +136,13 @@ class Database:
                          "WHERE orig_items IS NULL")
         if "pinned" not in pcols:
             conn.execute("ALTER TABLE patterns ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        if "status" not in pcols:
+            conn.execute("ALTER TABLE patterns ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+            # Carry the old taxonomy forward: a segment previously identified as
+            # an "Ad" was, in effect, confirmed for removal; anything else was
+            # never approved, so it returns to the review queue as pending.
+            if "label" in pcols:
+                conn.execute("UPDATE patterns SET status = 'confirmed' WHERE label = 'Ad'")
 
     @property
     def workspace(self) -> str:
@@ -140,15 +152,15 @@ class Database:
 
     def add_pattern(
         self, library: str, folder: str, items: list[int], item_sec: float,
-        bits: int, duration: float, label: str = "Other",
+        bits: int, duration: float, status: str = "pending",
     ) -> int:
         now = _now()
         blob = json.dumps(items)
         cur = self.conn.execute(
-            "INSERT INTO patterns (library, folder, label, bits, item_sec, items, "
+            "INSERT INTO patterns (library, folder, status, bits, item_sec, items, "
             "duration, shows, orig_items, orig_duration, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (library, folder, label, bits, item_sec, blob, duration, 1, blob, duration, now, now),
+            (library, folder, status, bits, item_sec, blob, duration, 1, blob, duration, now, now),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -160,12 +172,15 @@ class Database:
         )
         self.conn.commit()
 
-    def set_label(self, pattern_id: int, label: str) -> None:
-        if label not in LABELS:
-            raise ValueError(f"invalid label: {label}")
+    def set_status(self, pattern_id: int, status: str) -> None:
+        """Record the user's review decision for a segment. ``confirmed`` means
+        "this is an ad — approved for removal"; ``dismissed`` means "not an ad,
+        leave it"; ``pending`` returns it to the undecided queue."""
+        if status not in STATUSES:
+            raise ValueError(f"invalid status: {status}")
         self.conn.execute(
-            "UPDATE patterns SET label = ?, updated_at = ? WHERE id = ?",
-            (label, _now(), pattern_id),
+            "UPDATE patterns SET status = ?, updated_at = ? WHERE id = ?",
+            (status, _now(), pattern_id),
         )
         self.conn.commit()
 
@@ -369,7 +384,7 @@ class Database:
         return {"moved": True, "from": src_id, "to": target_pattern_id,
                 "deleted_source": deleted, "folder": target["folder"]}
 
-    def new_group_from_clip(self, clip_id: int, label: str = "Other") -> dict | None:
+    def new_group_from_clip(self, clip_id: int, status: str = "pending") -> dict | None:
         """Split one clip out into a brand-new pattern whose fingerprint is the
         clip's own cropped region — for when a clip was grouped with the wrong
         segment. Removes the source pattern if it is left empty."""
@@ -387,7 +402,7 @@ class Database:
             return {"error": "selection is too short to fingerprint"}
         dur = max(fp.item_sec, clip["end"] - clip["start"])
         new_id = self.add_pattern(
-            src["library"], src["folder"], items, fp.item_sec, fp.bits, dur, label,
+            src["library"], src["folder"], items, fp.item_sec, fp.bits, dur, status,
         )
         self.conn.execute("UPDATE patterns SET pinned = 1 WHERE id = ?", (new_id,))
         self.conn.execute("UPDATE clips SET pattern_id = ? WHERE id = ?", (new_id, clip_id))
@@ -569,7 +584,7 @@ class Database:
             lines.append("_No patterns catalogued yet._")
         for p in data["patterns"]:
             lines.append(
-                f"- **{p['label']}** · {p['folder']} · "
+                f"- **{p.get('status', 'pending')}** · {p['folder']} · "
                 f"{_fmt(p['duration'])} · seen in {p['shows']} file(s) "
                 f"`#{p['id']}`"
             )
@@ -583,8 +598,7 @@ class Database:
             lines.append(f"- `{r['file_name']}` — saved {_fmt(r['saved_sec'])}")
             for seg in removed:
                 lines.append(
-                    f"  - {seg.get('label','?')} · "
-                    f"{_fmt(seg.get('start',0))} → {_fmt(seg.get('end',0))}"
+                    f"  - {_fmt(seg.get('start',0))} → {_fmt(seg.get('end',0))}"
                 )
         lines.append("")
         return "\n".join(lines)
