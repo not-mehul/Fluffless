@@ -208,6 +208,25 @@ class Database:
         )
         self.conn.commit()
 
+    def set_clip_detected(self, clip_id: int, start: float, end: float) -> None:
+        """Set a clip's *detected* bounds (start/end and the immutable orig_*),
+        used when normalising a freshly-detected clip to the canonical length."""
+        self.conn.execute(
+            "UPDATE clips SET start = ?, end = ?, orig_start = ?, orig_end = ?, "
+            "preview = NULL WHERE id = ?",
+            (start, end, start, end, clip_id),
+        )
+        self.conn.commit()
+
+    def set_pattern_fingerprint(self, pattern_id: int, items: list[int], duration: float) -> None:
+        """Replace a pattern's canonical fingerprint and reset its refinement."""
+        self.conn.execute(
+            "UPDATE patterns SET items = ?, duration = ?, head_items = 0, "
+            "tail_items = 0, updated_at = ? WHERE id = ?",
+            (json.dumps(items), duration, _now(), pattern_id),
+        )
+        self.conn.commit()
+
     def trim_pattern(self, pattern_id: int, head: float, tail: float) -> int | None:
         """Set a pattern's refinement to ``head``/``tail`` seconds: tighten the
         stored fingerprint (so future scans locate just this, not the

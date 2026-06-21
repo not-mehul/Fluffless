@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .binaries import detect_tools
 from .clips import OUT_DIR, extract_preview, remove_segments
 from .db import LABELS, Database
-from .media import MediaFile, scan_library
+from .media import scan_library
 from .repetition import DetectParams
 from .scan import scan_folder
 
@@ -105,6 +105,9 @@ def _enrich(payload: dict, job: ScanJob) -> dict:
         ev["message"] = f"Matched a known {payload.get('label', '')} · {payload.get('file', '')}"
     elif stage == "found":
         ev["message"] = f"New segment · {payload.get('file', '')}"
+    elif stage == "normalize":
+        ev["percent"] = DETECT_END
+        ev["message"] = "Aligning segment lengths"
     elif stage == "preview":
         job.previews += 1
         ev["percent"] = round(min(99.0, DETECT_END + job.previews * 0.2), 1)
@@ -381,20 +384,9 @@ class Handler(BaseHTTPRequestHandler):
         the job queue, then a final ``result`` event and an ``end`` sentinel."""
         st = self.state
 
-        def make_preview(mf: MediaFile, start: float, end: float):
-            if not st.tools.has_ffmpeg:
-                return None
-            job.put(_enrich({"stage": "preview", "file": mf.name}, job))
-            try:
-                out = extract_preview(mf.path, start, end, st.preview_dir(), st.tools, mf.kind)
-                return os.path.relpath(out, st.preview_dir())
-            except Exception as exc:  # noqa: BLE001
-                job.previews_failed += 1
-                msg = f"Preview failed for {mf.name}: {exc}"
-                print("  ! " + msg)                       # visible in the console
-                job.put({"stage": "warn", "message": msg})
-                return None
-
+        # Previews are built on demand (on first play), not during the scan:
+        # length-normalisation would invalidate any pre-built ones anyway, and
+        # skipping them keeps scans fast on large libraries.
         def progress(payload: dict) -> None:
             job.put(_enrich(payload, job))
 
@@ -402,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
             with st.lock:
                 result = scan_folder(
                     st.db, st.library, folder.name, files, st.tools,
-                    params=params, progress=progress, make_preview=make_preview,
+                    params=params, progress=progress, make_preview=None,
                     workers=workers,
                 )
             job.put({
