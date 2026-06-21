@@ -109,10 +109,17 @@ def scan_folder(
     # 1. Fingerprint every chosen file (parallel: fpcalc/ffmpeg are subprocesses,
     #    so threads run several at once across cores).
     prints = _fingerprint_all(files, tools, progress, workers)
+    # Cache fingerprints so a later-identified ad can be located in these files
+    # without re-reading the audio.
+    for mf, fp in prints:
+        db.store_fingerprint(mf.path, folder, fp)
     result.files_scanned = len(prints)
 
-    # 2. Match known patterns against each file (works even for a single file).
-    known = db.patterns(folder)
+    # 2. Match known *ad* signatures against each file (works for a single file).
+    #    Only Ad-labeled patterns are reused as known signatures — intro/outro/
+    #    other are redundant to re-match, and unlabeled detections would risk
+    #    forcing spurious clips onto new files.
+    known = [row for row in db.patterns(folder) if row["label"] == "Ad"]
     for mf, fp in prints:
         p = base.scaled(fp.bits)
         for row in known:
@@ -182,14 +189,49 @@ def scan_folder(
     return result
 
 
+def apply_pattern_to_stored(
+    db: Database, pattern_id: int, base: DetectParams | None = None,
+) -> int:
+    """Locate one pattern's fingerprint in every cached file fingerprint of its
+    folder and add a clip wherever it occurs but isn't already recorded. This is
+    how a newly-identified ad is back-applied to files that were scanned before
+    it existed — no audio is re-read. Returns the number of clips added."""
+    base = base or DetectParams()
+    row = db.pattern(pattern_id)
+    if row is None:
+        return 0
+    items = db.pattern_items(row)
+    if not items:
+        return 0
+    p = base.scaled(row["bits"])
+    added = 0
+    for file_path, fp in db.fingerprints(row["folder"]):
+        if fp.bits != row["bits"]:
+            continue
+        hit = locate(items, fp.items, p)
+        if hit is None:
+            continue
+        start = hit[0] * fp.item_sec
+        end = hit[1] * fp.item_sec
+        if end - start < 0.2 or db.clip_exists(pattern_id, file_path, start):
+            continue
+        db.add_clip(pattern_id, file_path, start, end)
+        db.bump_pattern(pattern_id)
+        added += 1
+    return added
+
+
 def _normalize_pattern_lengths(
     db: Database, pattern_ids: list[int],
     fp_by_path: dict[str, Fingerprint], base: DetectParams,
 ) -> None:
     """Make a pattern's clips a consistent length. Picks a median-length clip as
-    the canonical occurrence, re-derives the pattern fingerprint from it, then
-    re-locates that fingerprint in every member file and snaps each clip to the
-    located span. A clip whose match is implausibly off-length is left as-is."""
+    the canonical occurrence, re-locates that fingerprint in every member file,
+    and snaps each clip to the located span (``locate`` naturally trims silence /
+    low-entropy over-capture). The pattern's stored fingerprint and duration are
+    then re-derived from a median *located* span, so the pattern's length stays
+    in step with its clips. A clip whose match is implausibly off-length is left
+    as-is."""
     for pid in pattern_ids:
         clips = db.clips(pid)
         avail = [(c, fp_by_path[c["file_path"]]) for c in clips if c["file_path"] in fp_by_path]
@@ -202,17 +244,28 @@ def _normalize_pattern_lengths(
         if not canon:
             continue
         canon_dur = cclip["end"] - cclip["start"]
-        db.set_pattern_fingerprint(pid, canon, canon_dur)
+
+        relocated: list[tuple] = []
         for c, fp in avail:
             hit = locate(canon, fp.items, p)
             if not hit:
                 continue
             s = hit[0] * fp.item_sec
             e = hit[1] * fp.item_sec
-            # Accept the relocation only if it lands near the canonical length,
-            # so a spurious match can't wildly resize a clip.
             if e > s and abs((e - s) - canon_dur) <= 0.35 * canon_dur + 1.0:
-                db.set_clip_detected(c["id"], s, e)
+                relocated.append((c, fp, s, e))
+        if not relocated:
+            continue
+
+        # Re-derive the pattern fingerprint from a median *located* occurrence so
+        # its stored duration matches the (tightened) clips.
+        relocated.sort(key=lambda r: r[3] - r[2])
+        _, mfp, ms, me = relocated[len(relocated) // 2]
+        tight = mfp.slice_seconds(ms, me)
+        if tight:
+            db.set_pattern_fingerprint(pid, tight, me - ms)
+        for c, _fp, s, e in relocated:
+            db.set_clip_detected(c["id"], s, e)
 
 
 def _store_segment(

@@ -20,7 +20,10 @@ import json
 import os
 import sqlite3
 import time
+from array import array
 from dataclasses import dataclass
+
+from .repetition import Fingerprint
 
 LABELS = ("Ad", "Intro", "Outro", "Other")
 WORKSPACE = ".fluffless"
@@ -63,6 +66,15 @@ CREATE TABLE IF NOT EXISTS processed (
     output_path TEXT,
     removed     TEXT,                   -- JSON: list of removed [start,end,label]
     saved_sec   REAL NOT NULL DEFAULT 0,
+    created_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fingerprints (
+    file_path   TEXT PRIMARY KEY,       -- one cached fingerprint per scanned file
+    folder      TEXT NOT NULL,
+    bits        INTEGER NOT NULL,
+    item_sec    REAL NOT NULL,
+    items       BLOB NOT NULL,          -- packed array of fingerprint integers
     created_at  REAL NOT NULL
 );
 """
@@ -325,6 +337,37 @@ class Database:
 
     def processed(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM processed ORDER BY id DESC"))
+
+    # --- cached fingerprints -------------------------------------------------
+    # Each scanned file's fingerprint is kept so a newly-identified ad can be
+    # checked against every file (old ones included) without re-reading audio.
+
+    def store_fingerprint(self, file_path: str, folder: str, fp: Fingerprint) -> None:
+        typecode = "Q" if fp.bits > 32 else "I"
+        blob = array(typecode, fp.items).tobytes()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO fingerprints (file_path, folder, bits, "
+            "item_sec, items, created_at) VALUES (?,?,?,?,?,?)",
+            (file_path, folder, fp.bits, fp.item_sec, blob, _now()),
+        )
+        self.conn.commit()
+
+    def fingerprints(self, folder: str) -> list[tuple[str, Fingerprint]]:
+        out = []
+        for row in self.conn.execute(
+            "SELECT * FROM fingerprints WHERE folder = ?", (folder,)
+        ):
+            typecode = "Q" if row["bits"] > 32 else "I"
+            arr = array(typecode)
+            arr.frombytes(row["items"])
+            out.append((row["file_path"],
+                        Fingerprint(items=arr, item_sec=row["item_sec"], bits=row["bits"])))
+        return out
+
+    def has_fingerprint(self, file_path: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM fingerprints WHERE file_path = ? LIMIT 1", (file_path,)
+        ).fetchone() is not None
 
     # --- export --------------------------------------------------------------
 

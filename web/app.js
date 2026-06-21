@@ -590,8 +590,16 @@
 
   async function setLabel(p, label, el) {
     try {
-      await post("/api/label", { pattern_id: p.id, label });
+      const res = await post("/api/label", { pattern_id: p.id, label });
       p.label = label;
+      // Labeling an Ad may have tagged more files (it's now a known signature).
+      if (res.applied_to && res.patterns) {
+        state.patterns = res.patterns;
+        renderPatterns();
+        renderRemoveLabels();
+        toast(`Ad identified — found in ${res.applied_to} more file${res.applied_to === 1 ? "" : "s"}`, "notice");
+        return;
+      }
       el.className = "pattern " + label;
       el.querySelector(".status-verb").textContent = label;
       el.querySelectorAll(".pattern-labels button").forEach((b) =>
