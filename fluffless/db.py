@@ -37,11 +37,14 @@ CREATE TABLE IF NOT EXISTS patterns (
     label       TEXT NOT NULL DEFAULT 'Other',
     bits        INTEGER NOT NULL,
     item_sec    REAL NOT NULL,
-    items       TEXT NOT NULL,          -- JSON array of fingerprint integers (original)
+    items       TEXT NOT NULL,          -- JSON array of fingerprint integers (current/effective base)
     duration    REAL NOT NULL,
     shows       INTEGER NOT NULL DEFAULT 1,
     head_items  INTEGER NOT NULL DEFAULT 0,  -- items trimmed off the front (refinement)
     tail_items  INTEGER NOT NULL DEFAULT 0,  -- items trimmed off the end (refinement)
+    orig_items  TEXT,                    -- detected fingerprint baseline (for "reset to default")
+    orig_duration REAL,                  -- detected duration baseline (for "reset to default")
+    pinned      INTEGER NOT NULL DEFAULT 0,  -- 1 once the user fixes the fingerprint by hand
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -120,6 +123,14 @@ class Database:
         if "head_items" not in pcols:
             conn.execute("ALTER TABLE patterns ADD COLUMN head_items INTEGER NOT NULL DEFAULT 0")
             conn.execute("ALTER TABLE patterns ADD COLUMN tail_items INTEGER NOT NULL DEFAULT 0")
+        if "orig_items" not in pcols:
+            conn.execute("ALTER TABLE patterns ADD COLUMN orig_items TEXT")
+            conn.execute("ALTER TABLE patterns ADD COLUMN orig_duration REAL")
+            # Backfill: an existing pattern's current fingerprint is its baseline.
+            conn.execute("UPDATE patterns SET orig_items = items, orig_duration = duration "
+                         "WHERE orig_items IS NULL")
+        if "pinned" not in pcols:
+            conn.execute("ALTER TABLE patterns ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
 
     @property
     def workspace(self) -> str:
@@ -132,10 +143,12 @@ class Database:
         bits: int, duration: float, label: str = "Other",
     ) -> int:
         now = _now()
+        blob = json.dumps(items)
         cur = self.conn.execute(
             "INSERT INTO patterns (library, folder, label, bits, item_sec, items, "
-            "duration, shows, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (library, folder, label, bits, item_sec, json.dumps(items), duration, 1, now, now),
+            "duration, shows, orig_items, orig_duration, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (library, folder, label, bits, item_sec, blob, duration, 1, blob, duration, now, now),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -231,13 +244,158 @@ class Database:
         self.conn.commit()
 
     def set_pattern_fingerprint(self, pattern_id: int, items: list[int], duration: float) -> None:
-        """Replace a pattern's canonical fingerprint and reset its refinement."""
+        """Replace a pattern's canonical fingerprint *and* its reset baseline,
+        clearing any refinement. Used by scan-time length normalisation — this is
+        what "default" means, so reset-to-default returns here."""
+        blob = json.dumps(items)
+        self.conn.execute(
+            "UPDATE patterns SET items = ?, orig_items = ?, duration = ?, "
+            "orig_duration = ?, head_items = 0, tail_items = 0, updated_at = ? WHERE id = ?",
+            (blob, blob, duration, duration, _now(), pattern_id),
+        )
+        self.conn.commit()
+
+    def pin_fingerprint(self, pattern_id: int, items: list[int], duration: float) -> None:
+        """Adopt a user-chosen fingerprint as the pattern's canonical one without
+        touching the reset baseline, and mark the pattern *pinned* so a later
+        re-scan won't re-normalise it away. This is the mechanism behind
+        "use this clip's cropped region as the saved fingerprint"."""
         self.conn.execute(
             "UPDATE patterns SET items = ?, duration = ?, head_items = 0, "
-            "tail_items = 0, updated_at = ? WHERE id = ?",
+            "tail_items = 0, pinned = 1, updated_at = ? WHERE id = ?",
             (json.dumps(items), duration, _now(), pattern_id),
         )
         self.conn.commit()
+
+    def set_fingerprint_from_clip(self, clip_id: int) -> dict | None:
+        """Use one clip's *current* (possibly hand-cropped) bounds as the saved
+        fingerprint for its pattern. Slices the clip's cached file fingerprint
+        over those bounds and pins it — so future scans look for exactly that,
+        not the surrounding content. Other clips keep their own bounds."""
+        clip = self.clip(clip_id)
+        if clip is None:
+            return None
+        fp = self.get_fingerprint(clip["file_path"])
+        if fp is None:
+            return {"error": "no cached fingerprint for this file — re-scan the folder first"}
+        items = list(fp.slice_seconds(clip["start"], clip["end"]))
+        if len(items) < 1:
+            return {"error": "selection is too short to fingerprint"}
+        dur = max(fp.item_sec, clip["end"] - clip["start"])
+        self.pin_fingerprint(clip["pattern_id"], items, dur)
+        return {"pattern_id": clip["pattern_id"], "items": len(items), "duration": dur}
+
+    def reset_pattern(self, pattern_id: int) -> int | None:
+        """Reset a pattern to its detected default: restore the baseline
+        fingerprint, drop any head/tail refinement and the pinned flag, and
+        return every clip to its detected bounds. Returns clips restored."""
+        row = self.pattern(pattern_id)
+        if row is None:
+            return None
+        keys = row.keys()
+        orig_items = row["orig_items"] if "orig_items" in keys else None
+        orig_dur = row["orig_duration"] if "orig_duration" in keys else None
+        if orig_items:
+            self.conn.execute(
+                "UPDATE patterns SET items = ?, duration = ?, head_items = 0, "
+                "tail_items = 0, pinned = 0, updated_at = ? WHERE id = ?",
+                (orig_items, orig_dur if orig_dur is not None else row["duration"],
+                 _now(), pattern_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE patterns SET head_items = 0, tail_items = 0, pinned = 0, "
+                "updated_at = ? WHERE id = ?",
+                (_now(), pattern_id),
+            )
+        n = 0
+        for c in self.clips(pattern_id):
+            os_, oe = self._orig_bounds(c)
+            self.conn.execute(
+                "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
+                (os_, oe, c["id"]),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def reset_clip(self, clip_id: int) -> tuple[float, float] | None:
+        """Return one clip to its detected bounds (clearing its stale preview).
+        Leaves the pattern fingerprint untouched."""
+        clip = self.clip(clip_id)
+        if clip is None:
+            return None
+        os_, oe = self._orig_bounds(clip)
+        self.conn.execute(
+            "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
+            (os_, oe, clip_id),
+        )
+        self.conn.commit()
+        return (os_, oe)
+
+    def _recount_shows(self, pattern_id: int) -> int:
+        """Set a pattern's ``shows`` to its current clip count; delete it if it
+        has no clips left. Returns the new count (0 ⇒ deleted)."""
+        n = self.conn.execute(
+            "SELECT COUNT(*) FROM clips WHERE pattern_id = ?", (pattern_id,)
+        ).fetchone()[0]
+        if n == 0:
+            self.conn.execute("DELETE FROM patterns WHERE id = ?", (pattern_id,))
+        else:
+            self.conn.execute(
+                "UPDATE patterns SET shows = ?, updated_at = ? WHERE id = ?",
+                (n, _now(), pattern_id),
+            )
+        return n
+
+    def move_clip(self, clip_id: int, target_pattern_id: int) -> dict | None:
+        """Reassign one clip to another existing pattern in the same folder —
+        correcting a mis-grouping. Recounts both patterns and removes the source
+        if it is left empty."""
+        clip = self.clip(clip_id)
+        target = self.pattern(target_pattern_id)
+        if clip is None or target is None:
+            return None
+        src_id = clip["pattern_id"]
+        if src_id == target_pattern_id:
+            return {"moved": False, "to": target_pattern_id,
+                    "deleted_source": False, "folder": target["folder"]}
+        self.conn.execute(
+            "UPDATE clips SET pattern_id = ? WHERE id = ?", (target_pattern_id, clip_id)
+        )
+        self._recount_shows(target_pattern_id)
+        deleted = self._recount_shows(src_id) == 0
+        self.conn.commit()
+        return {"moved": True, "from": src_id, "to": target_pattern_id,
+                "deleted_source": deleted, "folder": target["folder"]}
+
+    def new_group_from_clip(self, clip_id: int, label: str = "Other") -> dict | None:
+        """Split one clip out into a brand-new pattern whose fingerprint is the
+        clip's own cropped region — for when a clip was grouped with the wrong
+        segment. Removes the source pattern if it is left empty."""
+        clip = self.clip(clip_id)
+        if clip is None:
+            return None
+        src = self.pattern(clip["pattern_id"])
+        if src is None:
+            return None
+        fp = self.get_fingerprint(clip["file_path"])
+        if fp is None:
+            return {"error": "no cached fingerprint for this file — re-scan the folder first"}
+        items = list(fp.slice_seconds(clip["start"], clip["end"]))
+        if len(items) < 1:
+            return {"error": "selection is too short to fingerprint"}
+        dur = max(fp.item_sec, clip["end"] - clip["start"])
+        new_id = self.add_pattern(
+            src["library"], src["folder"], items, fp.item_sec, fp.bits, dur, label,
+        )
+        self.conn.execute("UPDATE patterns SET pinned = 1 WHERE id = ?", (new_id,))
+        self.conn.execute("UPDATE clips SET pattern_id = ? WHERE id = ?", (new_id, clip_id))
+        self._recount_shows(new_id)
+        deleted = self._recount_shows(clip["pattern_id"]) == 0
+        self.conn.commit()
+        return {"new_pattern_id": new_id, "from": clip["pattern_id"],
+                "deleted_source": deleted, "folder": src["folder"]}
 
     def trim_pattern(self, pattern_id: int, head: float, tail: float) -> int | None:
         """Set a pattern's refinement to ``head``/``tail`` seconds: tighten the
@@ -262,8 +420,8 @@ class Database:
         new_dur = max(item_sec, (n_items - h - t) * item_sec)
         self.conn.execute(
             "UPDATE patterns SET head_items = ?, tail_items = ?, duration = ?, "
-            "updated_at = ? WHERE id = ?",
-            (h, t, new_dur, _now(), pattern_id),
+            "pinned = ?, updated_at = ? WHERE id = ?",
+            (h, t, new_dur, 1 if (h or t) else 0, _now(), pattern_id),
         )
         n = 0
         for c in self.clips(pattern_id):
@@ -363,6 +521,19 @@ class Database:
             out.append((row["file_path"],
                         Fingerprint(items=arr, item_sec=row["item_sec"], bits=row["bits"])))
         return out
+
+    def get_fingerprint(self, file_path: str) -> Fingerprint | None:
+        """The one cached fingerprint for a file, or None if it was never
+        scanned (or its cache was cleared)."""
+        row = self.conn.execute(
+            "SELECT * FROM fingerprints WHERE file_path = ?", (file_path,)
+        ).fetchone()
+        if row is None:
+            return None
+        typecode = "Q" if row["bits"] > 32 else "I"
+        arr = array(typecode)
+        arr.frombytes(row["items"])
+        return Fingerprint(items=arr, item_sec=row["item_sec"], bits=row["bits"])
 
     def has_fingerprint(self, file_path: str) -> bool:
         return self.conn.execute(

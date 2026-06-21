@@ -429,6 +429,7 @@
             <span class="chip-mono">${fmtDur(p.duration)}</span>
             <span class="chip-mono">${p.shows} show${p.shows === 1 ? "" : "s"}</span>
             <span class="chip-mono">${p.clips.length} clip${p.clips.length === 1 ? "" : "s"}</span>
+            ${(p.pinned || p.head_trim || p.tail_trim) ? `<span class="chip-mono custom" title="This pattern's saved fingerprint was set by hand">custom</span>` : ""}
           </span>
         </div>
         <div class="pattern-controls">
@@ -442,7 +443,8 @@
         <label class="trim-field">start <input type="number" class="num-input trim-head" min="0" step="0.5" value="${p.head_trim || 0}"/>s</label>
         <label class="trim-field">end <input type="number" class="num-input trim-tail" min="0" step="0.5" value="${p.tail_trim || 0}"/>s</label>
         <button class="btn-ghost trim-apply">Apply to all ${p.clips.length}</button>
-        <span class="trim-hint">Seconds to trim off the detected start &amp; end of every clip — also tightens future detection. Re-applying the same values changes nothing.</span>
+        <button class="btn-ghost trim-reset">Reset to default</button>
+        <span class="trim-hint">Seconds to trim off the detected start &amp; end of every clip — also tightens future detection. <em>Reset to default</em> restores the detected fingerprint and every clip's original bounds.</span>
       </div>
       <div class="clip-list">${clips}</div>`;
 
@@ -456,6 +458,7 @@
       el.querySelector(".trim-btn").classList.toggle("active", !panel.classList.contains("hidden"));
     });
     el.querySelector(".trim-apply").addEventListener("click", () => applyPatternTrim(p, el));
+    el.querySelector(".trim-reset").addEventListener("click", () => resetPattern(p, el));
     el.querySelectorAll(".preview-btn").forEach((b) => {
       const clip = p.clips.find((c) => c.id === Number(b.dataset.clip));
       b.addEventListener("click", () => playClip(b, clip));
@@ -498,6 +501,21 @@
     }
   }
 
+  async function resetPattern(p, el) {
+    const btn = el.querySelector(".trim-reset");
+    btn.disabled = true; btn.textContent = "Resetting…";
+    try {
+      const res = await post("/api/pattern/reset", { pattern_id: p.id });
+      state.patterns = res.patterns || state.patterns;
+      renderPatterns();
+      renderRemoveLabels();
+      toast("Pattern reset to detected defaults", "notice");
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false; btn.textContent = "Reset to default";
+    }
+  }
+
   function toggleClipEditor(btn, c, p) {
     const clipEl = btn.closest(".clip");
     const slot = clipEl.querySelector(".clip-media");
@@ -507,6 +525,11 @@
       return;
     }
     const n = p.clips.length;
+    const otherPatterns = state.patterns.filter((op) => op.id !== p.id);
+    const moveOpts = otherPatterns.map((op) =>
+      `<option value="${op.id}">${escapeHtml(op.label)} – ${fmtDur(op.duration)} (${op.shows} show${op.shows === 1 ? "" : "s"})</option>`
+    ).join("");
+
     slot.innerHTML = `
       <div class="clip-edit">
         <div class="edit-fields">
@@ -514,6 +537,15 @@
           <label>end <input type="number" class="num-input edit-end" step="0.1" min="0" value="${c.end}"/>s</label>
           <button class="btn-ghost save-bounds">Save &amp; preview</button>
           ${n > 1 ? `<button class="btn-ghost apply-all">Apply to all ${n}</button>` : ""}
+        </div>
+        <div class="edit-actions">
+          <button class="btn-ghost clip-reset-btn">Reset to detected</button>
+          <button class="btn-ghost clip-fp-btn" title="Save this clip's adjusted region as the pattern's fingerprint — future scans will match exactly this span">Use as fingerprint</button>
+          <select class="clip-move-sel">
+            <option value="">Move to group…</option>
+            ${moveOpts}
+            <option value="new">↳ New group from this clip</option>
+          </select>
         </div>
         ${n > 1 ? `<p class="edit-hint"><em>Apply to all.</em> Trim every clip of this pattern by the same amount you trimmed here — and tighten future detection to match.</p>` : ""}
         <div class="edit-player"></div>
@@ -523,6 +555,14 @@
     slot.querySelector(".save-bounds").addEventListener("click", () => saveClipBounds(clipEl, c, slot));
     const applyBtn = slot.querySelector(".apply-all");
     if (applyBtn) applyBtn.addEventListener("click", () => applyClipToAll(c, p, slot));
+    slot.querySelector(".clip-reset-btn").addEventListener("click", () => resetClip(c, slot, clipEl));
+    slot.querySelector(".clip-fp-btn").addEventListener("click", () => setFingerprintFromClip(c, slot));
+    slot.querySelector(".clip-move-sel").addEventListener("change", (e) => {
+      const val = e.target.value;
+      if (!val) return;
+      e.target.value = "";
+      moveClip(c, p, val);
+    });
   }
 
   async function applyClipToAll(c, p, slot) {
@@ -577,6 +617,54 @@
     state.patterns.forEach((p) => p.clips.forEach((c) => {
       if (c.id === clipId) { c.start = start; c.end = end; if (hasPreview !== undefined) c.has_preview = hasPreview; }
     }));
+  }
+
+  async function resetClip(c, slot, clipEl) {
+    const resetBtn = slot.querySelector(".clip-reset-btn");
+    resetBtn.disabled = true; resetBtn.textContent = "Resetting…";
+    try {
+      const res = await post("/api/clip/reset", { clip_id: c.id });
+      c.start = res.start; c.end = res.end; c.has_preview = false;
+      updateClipInState(c.id, res.start, res.end, false);
+      clipEl.querySelector(".crange").textContent = `${fmtDur(res.start)}–${fmtDur(res.end)}`;
+      slot.querySelector(".edit-start").value = res.start;
+      slot.querySelector(".edit-end").value = res.end;
+      slot.querySelector(".edit-player").innerHTML = "";
+      delete slot.dataset.loaded;
+      toast("Clip reset to detected bounds", "notice");
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      resetBtn.disabled = false; resetBtn.textContent = "Reset to detected";
+    }
+  }
+
+  async function setFingerprintFromClip(c, slot) {
+    const start = parseFloat(slot.querySelector(".edit-start").value);
+    const end = parseFloat(slot.querySelector(".edit-end").value);
+    if (!(end - start >= 0.2)) { toast("End must be at least 0.2s after start", "error"); return; }
+    const fpBtn = slot.querySelector(".clip-fp-btn");
+    fpBtn.disabled = true; fpBtn.textContent = "Saving…";
+    try {
+      const res = await post("/api/pattern/fingerprint", { clip_id: c.id, start, end });
+      state.patterns = res.patterns || state.patterns;
+      renderPatterns();
+      renderRemoveLabels();
+      toast(`Fingerprint saved — ${fmtDur(res.duration)} region locked for future detection`, "notice");
+    } catch (e) {
+      toast(e.message, "error");
+      fpBtn.disabled = false; fpBtn.textContent = "Use as fingerprint";
+    }
+  }
+
+  async function moveClip(c, p, targetId) {
+    try {
+      const res = await post("/api/clip/move", { clip_id: c.id, target_pattern_id: targetId });
+      state.patterns = res.patterns || state.patterns;
+      renderPatterns();
+      renderRemoveLabels();
+      toast(targetId === "new" ? "Split into new group" : "Clip moved to group", "notice");
+    } catch (e) { toast(e.message, "error"); }
   }
 
   async function playClip(btn, c) {
