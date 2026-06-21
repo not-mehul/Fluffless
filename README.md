@@ -85,10 +85,18 @@ python3 -m fluffless ./sample
 
 # Or point it at your own media
 python3 -m fluffless "/path/to/your/media" --port 7654
+
+# Control parallelism (defaults to your CPU core count; 1 disables it)
+python3 -m fluffless "/path/to/your/media" --workers 8
 ```
 
 Then open <http://127.0.0.1:7654>. With no path, Fluffless opens
 `~/Fluffless Media` if it exists (override with `$FLUFFLESS_LIBRARY`).
+
+Scanning runs in parallel: fingerprinting (fpcalc/ffmpeg subprocesses) across
+threads and the `O(N²)` cross-file detection across worker processes. `--workers`
+defaults to the number of CPU cores; if a worker pool can't start it falls back
+to single-process automatically.
 
 ---
 

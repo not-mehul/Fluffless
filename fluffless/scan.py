@@ -19,6 +19,7 @@ Progress is reported through a callback so the server can stream it to the UI.
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -51,6 +52,40 @@ def _emit(progress: ProgressFn | None, **payload) -> None:
         progress(payload)
 
 
+def _fingerprint_all(
+    files: list[MediaFile], tools: Tools, progress: ProgressFn | None, workers: int,
+) -> list[tuple[MediaFile, Fingerprint]]:
+    """Fingerprint every file, in parallel when asked. Results keep the input
+    order; failures are surfaced per file and skipped, not fatal."""
+    total = len(files)
+    slots: list[tuple[MediaFile, Fingerprint] | None] = [None] * total
+
+    if workers and workers > 1 and total > 1:
+        done = 0
+        with ThreadPoolExecutor(max_workers=min(workers, total)) as ex:
+            futures = {
+                ex.submit(fingerprint_file, mf.path, mf.kind, tools): (idx, mf)
+                for idx, mf in enumerate(files)
+            }
+            for fut in as_completed(futures):
+                idx, mf = futures[fut]
+                _emit(progress, stage="fingerprint", file=mf.name, index=done, total=total)
+                done += 1
+                try:
+                    slots[idx] = (mf, fut.result())
+                except Exception as exc:  # noqa: BLE001 — surface, don't abort the batch
+                    _emit(progress, stage="error", file=mf.name, message=str(exc))
+    else:
+        for idx, mf in enumerate(files):
+            _emit(progress, stage="fingerprint", file=mf.name, index=idx, total=total)
+            try:
+                slots[idx] = (mf, fingerprint_file(mf.path, mf.kind, tools))
+            except Exception as exc:  # noqa: BLE001
+                _emit(progress, stage="error", file=mf.name, message=str(exc))
+
+    return [s for s in slots if s is not None]
+
+
 def scan_folder(
     db: Database,
     library: str,
@@ -60,20 +95,14 @@ def scan_folder(
     params: DetectParams | None = None,
     progress: ProgressFn | None = None,
     make_preview: Callable[[MediaFile, float, float], str | None] | None = None,
+    workers: int = 1,
 ) -> ScanResult:
     base = params or DetectParams()
     result = ScanResult(folder=folder)
 
-    # 1. Fingerprint every chosen file.
-    prints: list[tuple[MediaFile, Fingerprint]] = []
-    for i, mf in enumerate(files):
-        _emit(progress, stage="fingerprint", file=mf.name, index=i, total=len(files))
-        try:
-            fp = fingerprint_file(mf.path, mf.kind, tools)
-        except Exception as exc:  # noqa: BLE001 — surface, don't abort the batch
-            _emit(progress, stage="error", file=mf.name, message=str(exc))
-            continue
-        prints.append((mf, fp))
+    # 1. Fingerprint every chosen file (parallel: fpcalc/ffmpeg are subprocesses,
+    #    so threads run several at once across cores).
+    prints = _fingerprint_all(files, tools, progress, workers)
     result.files_scanned = len(prints)
 
     # 2. Match known patterns against each file (works even for a single file).
@@ -117,7 +146,7 @@ def scan_folder(
             _emit(progress, stage="detect_progress", done=done, total=total)
 
         segs_per_file = recurring_segments(
-            [fp for _, fp in group], p, on_progress=_det_progress,
+            [fp for _, fp in group], p, on_progress=_det_progress, workers=workers,
         )
         for (mf, fp), segs in zip(group, segs_per_file):  # noqa: B905
             for start, end in segs:

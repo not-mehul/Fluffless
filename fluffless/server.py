@@ -143,7 +143,7 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
 class AppState:
     """Server-wide state: the active library, its database, and a folder cache."""
 
-    def __init__(self) -> None:
+    def __init__(self, workers: int = 1) -> None:
         self.tools = detect_tools()
         self.library: str | None = None
         self.db: Database | None = None
@@ -151,6 +151,7 @@ class AppState:
         self.lock = threading.Lock()
         self.scan_job: ScanJob | None = None
         self.scan_lock = threading.Lock()
+        self.workers = max(1, workers)
 
     def open_library(self, path: str) -> dict:
         path = os.path.abspath(os.path.expanduser(path))
@@ -299,6 +300,7 @@ class Handler(BaseHTTPRequestHandler):
             "tools": st.tools.status(),
             "library": st.library,
             "labels": list(LABELS),
+            "workers": st.workers,
             "folders": [f.to_dict() for f in st.folders] if st.library else [],
         })
 
@@ -342,16 +344,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error("no files selected")
 
             params = _params_from(body)
+            try:
+                workers = int(body.get("workers") or st.workers)
+            except (TypeError, ValueError):
+                workers = st.workers
+            workers = max(1, workers)
             job = ScanJob(folder.name, len(files))
             st.scan_job = job
 
         thread = threading.Thread(
-            target=self._run_scan_job, args=(job, folder, files, params), daemon=True,
+            target=self._run_scan_job, args=(job, folder, files, params, workers), daemon=True,
         )
         thread.start()
-        self._json({"ok": True, "folder": folder.name, "total_files": len(files)})
+        self._json({"ok": True, "folder": folder.name, "total_files": len(files), "workers": workers})
 
-    def _run_scan_job(self, job: ScanJob, folder, files, params) -> None:
+    def _run_scan_job(self, job: ScanJob, folder, files, params, workers: int = 1) -> None:
         """Worker thread: runs the scan, pushing enriched progress events into
         the job queue, then a final ``result`` event and an ``end`` sentinel."""
         st = self.state
@@ -378,6 +385,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = scan_folder(
                     st.db, st.library, folder.name, files, st.tools,
                     params=params, progress=progress, make_preview=make_preview,
+                    workers=workers,
                 )
             job.put({
                 "stage": "result",
@@ -756,8 +764,9 @@ def _max_end(segs) -> float:
     return max((e for _, e, _ in segs), default=0.0) + 1.0
 
 
-def serve(library: str | None, host: str = "127.0.0.1", port: int = 7654) -> None:
-    state = AppState()
+def serve(library: str | None, host: str = "127.0.0.1", port: int = 7654,
+          workers: int = 1) -> None:
+    state = AppState(workers=workers)
     if library:
         try:
             state.open_library(library)
@@ -772,6 +781,7 @@ def serve(library: str | None, host: str = "127.0.0.1", port: int = 7654) -> Non
     print(f"  → http://{host}:{port}")
     print(f"  engines: ffmpeg {'ok' if tstat['ffmpeg'] else 'MISSING'} · "
           f"fpcalc {'ok' if tstat['fpcalc'] else 'MISSING'}")
+    print(f"  workers: {state.workers}")
     if state.library:
         print(f"  library: {state.library}")
     try:
