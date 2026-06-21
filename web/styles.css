@@ -343,6 +343,9 @@ body { transition: background 0.3s; }
 .file-row.processed .fname::after { content: " · trimmed"; color: var(--accent-sage); font-family: var(--mono);
   font-size: 0.6rem; font-style: normal; }
 
+.minlen-field { display: flex; align-items: center; gap: 0.6rem; cursor: text; }
+.minlen-unit { font-family: var(--serif); font-style: italic; font-size: 0.8rem; color: var(--text-faint); }
+
 .control-foot { display: flex; align-items: flex-end; justify-content: space-between;
   gap: 1rem; margin-top: 1rem; flex-wrap: wrap; }
 .meta-note { font-family: var(--mono); font-size: 0.68rem; color: var(--text-dim); letter-spacing: 0.05em; }
