@@ -429,6 +429,8 @@ body { transition: background 0.3s; }
 .chip-mono { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.04em;
   color: var(--text-muted); border: 1px solid var(--border-faint); background: var(--chip-bg);
   border-radius: 2px; padding: 0.12rem 0.45rem; }
+.chip-mono.custom { color: var(--accent-amber); border-color: rgba(var(--accent-amber-rgb), 0.45);
+  background: rgba(var(--accent-amber-rgb), 0.08); }
 
 .pattern-labels { display: flex; gap: 2px; padding: 3px; border-radius: 2px;
   border: 1px solid var(--border); background: var(--panel-bg-faint); }
@@ -494,6 +496,12 @@ body { transition: background 0.3s; }
 
 .clip-edit { display: flex; flex-direction: column; gap: 0.65rem; padding: 0.5rem 0 0.2rem; }
 .edit-fields { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
+.edit-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding-top: 0.55rem; border-top: 1px solid var(--border-faint); }
+.clip-move-sel { font-family: var(--mono); font-size: 0.7rem; background: var(--panel-bg);
+  border: 1px solid var(--border); color: var(--text-muted); border-radius: 2px;
+  padding: 0.28rem 0.5rem; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.clip-move-sel:hover { border-color: var(--accent-amber); color: var(--text-heading); }
 .edit-hint { font-family: var(--serif); font-style: italic; font-size: 0.78rem; color: var(--text-faint);
   margin: 0; }
 .edit-hint em { color: var(--text-muted); }

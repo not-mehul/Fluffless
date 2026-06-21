@@ -233,6 +233,9 @@ def _normalize_pattern_lengths(
     in step with its clips. A clip whose match is implausibly off-length is left
     as-is."""
     for pid in pattern_ids:
+        prow = db.pattern(pid)
+        if prow is not None and "pinned" in prow.keys() and prow["pinned"]:
+            continue  # respect a hand-chosen fingerprint — never re-normalise it
         clips = db.clips(pid)
         avail = [(c, fp_by_path[c["file_path"]]) for c in clips if c["file_path"] in fp_by_path]
         if len(avail) < 2:

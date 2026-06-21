@@ -152,6 +152,7 @@ def patterns_payload(db: Database, folder: str | None) -> list[dict]:
             "bits": row["bits"],
             "head_trim": round(head_items * item_sec, 2),
             "tail_trim": round(tail_items * item_sec, 2),
+            "pinned": bool(row["pinned"]) if "pinned" in keys else False,
             "clips": clips,
         })
     return out
@@ -297,8 +298,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_clip_adjust()
             if path == "/api/clip/propagate":
                 return self._api_clip_propagate()
+            if path == "/api/clip/reset":
+                return self._api_clip_reset()
+            if path == "/api/clip/move":
+                return self._api_clip_move()
             if path == "/api/pattern/adjust":
                 return self._api_pattern_adjust()
+            if path == "/api/pattern/reset":
+                return self._api_pattern_reset()
+            if path == "/api/pattern/fingerprint":
+                return self._api_pattern_fingerprint()
             return self._error("not found", 404)
         except ConnectionError:
             pass
@@ -697,6 +706,111 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "clips_adjusted": n,
             "patterns": patterns_payload(st.db, row["folder"]),
+        })
+
+    def _api_pattern_fingerprint(self) -> None:
+        """Adopt one clip's (possibly hand-cropped) region as the pattern's saved
+        fingerprint, so future scans match just that — not the surrounding
+        content. Optionally crops the clip first, in one action."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        clip = st.db.clip(int(body.get("clip_id")))
+        if not clip:
+            return self._error("unknown clip", 404)
+        if body.get("start") is not None and body.get("end") is not None:
+            try:
+                start = max(0.0, float(body["start"]))
+                end = float(body["end"])
+            except (TypeError, ValueError):
+                return self._error("start and end must be numbers")
+            if end - start < 0.2:
+                return self._error("end must be at least 0.2s after start")
+            st.db.update_clip_bounds(clip["id"], start, end)
+            self._rebuild_preview(clip["id"])
+        res = st.db.set_fingerprint_from_clip(clip["id"])
+        if res is None:
+            return self._error("unknown clip", 404)
+        if "error" in res:
+            return self._error(res["error"])
+        pattern = st.db.pattern(clip["pattern_id"])
+        self._json({
+            "ok": True,
+            "duration": round(res["duration"], 2),
+            "patterns": patterns_payload(st.db, pattern["folder"] if pattern else None),
+        })
+
+    def _api_pattern_reset(self) -> None:
+        """Reset a pattern to its detected default: baseline fingerprint, no
+        head/tail trim, and every clip back to its detected bounds."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        row = st.db.pattern(int(body.get("pattern_id")))
+        if not row:
+            return self._error("unknown pattern", 404)
+        n = st.db.reset_pattern(row["id"])
+        self._json({
+            "ok": True,
+            "clips_reset": n or 0,
+            "patterns": patterns_payload(st.db, row["folder"]),
+        })
+
+    def _api_clip_reset(self) -> None:
+        """Return one clip to its detected bounds and rebuild its preview."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        clip = st.db.clip(int(body.get("clip_id")))
+        if not clip:
+            return self._error("unknown clip", 404)
+        res = st.db.reset_clip(clip["id"])
+        if res is None:
+            return self._error("unknown clip", 404)
+        start, end = res
+        preview_ok, message = self._rebuild_preview(clip["id"])
+        self._json({
+            "ok": True,
+            "clip_id": clip["id"],
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "has_preview": preview_ok,
+            "preview_error": None if preview_ok else message,
+        })
+
+    def _api_clip_move(self) -> None:
+        """Move one clip to another group, or split it into a new one — for
+        correcting a mis-grouping. With ``target_pattern_id`` it reassigns;
+        without one (or "new") it creates a fresh group from the clip."""
+        st = self.state
+        if not st.db:
+            return self._error("open a library first")
+        body = self._body()
+        clip = st.db.clip(int(body.get("clip_id")))
+        if not clip:
+            return self._error("unknown clip", 404)
+        target = body.get("target_pattern_id")
+        if target in (None, "", "new"):
+            res = st.db.new_group_from_clip(clip["id"], label=body.get("label") or "Other")
+        else:
+            src = st.db.pattern(clip["pattern_id"])
+            tgt = st.db.pattern(int(target))
+            if not tgt:
+                return self._error("unknown target group", 404)
+            if src and tgt["folder"] != src["folder"]:
+                return self._error("can only move within the same folder")
+            res = st.db.move_clip(clip["id"], int(target))
+        if res is None:
+            return self._error("unknown clip", 404)
+        if "error" in res:
+            return self._error(res["error"])
+        self._json({
+            "ok": True,
+            "result": res,
+            "patterns": patterns_payload(st.db, res.get("folder")),
         })
 
     def _rebuild_preview(self, clip_id: int) -> tuple[bool, str | None]:

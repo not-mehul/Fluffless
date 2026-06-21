@@ -3,6 +3,7 @@
 import tempfile
 
 from fluffless.db import Database
+from fluffless.repetition import Fingerprint
 
 
 def test_update_clip_bounds_clears_preview():
@@ -70,4 +71,103 @@ def test_propagate_from_clip_applies_same_trim_to_all():
         assert len(db.pattern_items(db.pattern(pid))) == 15
         db.propagate_from_clip(a)
         assert (round(db.clip(b)["start"], 2), round(db.clip(b)["end"], 2)) == (23.5, 25.0)
+        db.close()
+
+
+def test_set_fingerprint_from_clip_pins_cropped_region():
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        # Pattern detected as a long 4.0s segment, but the real ad is a sub-span.
+        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0, "Ad")
+        db.store_fingerprint(
+            "/x/ep1.mp3", "Show",
+            Fingerprint(items=list(range(100)), item_sec=0.1, bits=32),
+        )
+        cid = db.add_clip(pid, "/x/ep1.mp3", 1.0, 3.0)   # user crops to [1.0, 3.0)
+
+        res = db.set_fingerprint_from_clip(cid)
+        assert res and res["items"] == 20                # items[10:30]
+        row = db.pattern(pid)
+        assert db.pattern_items(row) == list(range(10, 30))
+        assert row["pinned"] == 1
+        # The baseline is preserved, so reset can recover the full detection.
+        assert db.reset_pattern(pid) == 1
+        row = db.pattern(pid)
+        assert db.pattern_items(row) == list(range(40))
+        assert row["pinned"] == 0
+        db.close()
+
+
+def test_set_fingerprint_without_cache_reports_error():
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0)
+        cid = db.add_clip(pid, "/x/ep1.mp3", 1.0, 3.0)
+        res = db.set_fingerprint_from_clip(cid)        # no cached fingerprint
+        assert res and "error" in res
+        assert db.pattern(pid)["pinned"] == 0          # nothing changed
+        db.close()
+
+
+def test_reset_clip_restores_detected_bounds():
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        pid = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0)
+        cid = db.add_clip(pid, "/x/ep1.mp3", 5.0, 9.0, preview="p.m4a")
+        db.update_clip_bounds(cid, 6.0, 7.5)
+        os_, oe = db.reset_clip(cid)
+        assert (os_, oe) == (5.0, 9.0)
+        c = db.clip(cid)
+        assert (c["start"], c["end"]) == (5.0, 9.0)
+        assert c["preview"] is None
+        db.close()
+
+
+def test_move_clip_between_groups_and_recounts():
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        a = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0, "Ad")
+        b = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0, "Intro")
+        db.add_clip(a, "/x/ep1.mp3", 1.0, 3.0)
+        c2 = db.add_clip(a, "/x/ep2.mp3", 1.0, 3.0)
+
+        res = db.move_clip(c2, b)
+        assert res["moved"] and res["deleted_source"] is False
+        assert db.clip(c2)["pattern_id"] == b
+        assert db.pattern(a)["shows"] == 1     # recounted to remaining clips
+        assert db.pattern(b)["shows"] == 1
+        db.close()
+
+
+def test_move_last_clip_deletes_empty_source():
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        a = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0)
+        b = db.add_pattern(root, "Show", list(range(20)), 0.1, 32, 2.0)
+        cid = db.add_clip(a, "/x/ep1.mp3", 1.0, 3.0)
+        res = db.move_clip(cid, b)
+        assert res["deleted_source"] is True
+        assert db.pattern(a) is None
+        db.close()
+
+
+def test_new_group_from_clip_splits_out():
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        pid = db.add_pattern(root, "Show", list(range(40)), 0.1, 32, 4.0, "Ad")
+        db.store_fingerprint(
+            "/x/ep2.mp3", "Show",
+            Fingerprint(items=list(range(100)), item_sec=0.1, bits=32),
+        )
+        db.add_clip(pid, "/x/ep1.mp3", 1.0, 5.0)
+        c2 = db.add_clip(pid, "/x/ep2.mp3", 2.0, 4.0)
+
+        res = db.new_group_from_clip(c2, label="Intro")
+        new_id = res["new_pattern_id"]
+        assert new_id != pid and res["deleted_source"] is False
+        assert db.clip(c2)["pattern_id"] == new_id
+        new_row = db.pattern(new_id)
+        assert new_row["label"] == "Intro" and new_row["pinned"] == 1
+        assert db.pattern_items(new_row) == list(range(20, 40))   # items[20:40]
+        assert db.pattern(pid)["shows"] == 1                      # source recounted
         db.close()
