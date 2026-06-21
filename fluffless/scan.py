@@ -189,6 +189,113 @@ def scan_folder(
     return result
 
 
+def relocate_group_from_clip(
+    db: Database, clip_id: int, base: DetectParams | None = None,
+) -> dict | None:
+    """Re-derive a whole group from one hand-cropped clip.
+
+    This is the "I found the ad — now find it everywhere" step. It pins the
+    clip's current (cropped) region as its pattern's canonical fingerprint, then
+    locates *that exact segment* in every cached file of the folder:
+
+      * occurrences that line up with a clip already in the group are snapped to
+        the cropped length, so every member is the same exact segment;
+      * files that contain the segment but weren't in the group are pulled in;
+      * clips that no longer contain the segment are moved out into a new group —
+        they're a different ad, to be reviewed on their own.
+
+    The result: one tight group of identical-length occurrences the user can
+    confirm together. Returns a summary dict (or ``{"error": ...}`` / ``None``).
+    """
+    base = base or DetectParams()
+    clip = db.clip(clip_id)
+    if clip is None:
+        return None
+    prow = db.pattern(clip["pattern_id"])
+    if prow is None:
+        return None
+    pid = prow["id"]
+
+    src_fp = db.get_fingerprint(clip["file_path"])
+    if src_fp is None:
+        return {"error": "no cached fingerprint for this file — re-scan the folder first"}
+    items = list(src_fp.slice_seconds(clip["start"], clip["end"]))
+    if len(items) < 1:
+        return {"error": "selection is too short to fingerprint"}
+    crop_dur = max(src_fp.item_sec, clip["end"] - clip["start"])
+
+    # Lock the cropped region in as the group's fingerprint (future scans + a
+    # later "mark as ad" both reuse exactly this span).
+    db.pin_fingerprint(pid, items, crop_dur)
+
+    p = base.scaled(prow["bits"])
+
+    # 1. Locate the cropped segment everywhere in the folder. Every located
+    #    occurrence gets the *same* length (crop_dur) so the group is uniform.
+    targets: dict[str, list[float]] = {}        # file_path -> located start times
+    for file_path, fp in db.fingerprints(prow["folder"]):
+        if fp.bits != prow["bits"]:
+            continue
+        for s_item, _e_item in locate_all(items, fp.items, p):
+            targets.setdefault(file_path, []).append(s_item * fp.item_sec)
+
+    # 2. Reconcile the group's existing clips against the located occurrences.
+    #    A clip overlapping an occurrence in its file is the *same* airing →
+    #    snap it; a clip with no overlapping occurrence is a different segment.
+    consumed: set[tuple[str, int]] = set()
+    snapped = 0
+    nonmatch_ids: list[int] = []
+    for c in db.clips(pid):
+        starts = targets.get(c["file_path"], [])
+        hit = None
+        for i, ts in enumerate(starts):
+            if (c["file_path"], i) in consumed:
+                continue
+            te = ts + crop_dur
+            if min(c["end"], te) - max(c["start"], ts) > 0:    # any overlap
+                hit = (i, ts, te)
+                break
+        if hit is None:
+            nonmatch_ids.append(c["id"])
+            continue
+        i, ts, te = hit
+        consumed.add((c["file_path"], i))
+        db.set_clip_detected(c["id"], ts, te)
+        snapped += 1
+
+    # 3. Add the occurrences nothing claimed — episodes (or repeat airings) that
+    #    contain the segment but weren't in the group yet.
+    added = 0
+    for file_path, starts in targets.items():
+        for i, ts in enumerate(starts):
+            if (file_path, i) in consumed:
+                continue
+            if db.clip_exists(pid, file_path, ts):
+                continue
+            db.add_clip(pid, file_path, ts, ts + crop_dur)
+            added += 1
+
+    # 4. Move the non-matching clips out into their own pending group.
+    leftover_id = None
+    if nonmatch_ids:
+        res = db.new_group_from_clip(nonmatch_ids[0], status="pending")
+        if res and "error" not in res:
+            leftover_id = res["new_pattern_id"]
+            for cid in nonmatch_ids[1:]:
+                db.move_clip(cid, leftover_id)
+
+    db.recount_shows(pid)
+    return {
+        "pattern_id": pid,
+        "folder": prow["folder"],
+        "snapped": snapped,
+        "added": added,
+        "moved_out": len(nonmatch_ids),
+        "leftover_group_id": leftover_id,
+        "duration": crop_dur,
+    }
+
+
 def absorb_overlapping_pending(
     db: Database,
     confirmed_pattern_id: int,

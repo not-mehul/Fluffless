@@ -545,6 +545,7 @@
         <div class="edit-actions">
           <button class="btn-ghost clip-reset-btn">Reset to detected</button>
           <button class="btn-ghost clip-fp-btn" title="Save this clip's adjusted region as the pattern's fingerprint — future scans will match exactly this span">Use as fingerprint</button>
+          <button class="btn-ghost clip-relocate-btn" title="Find this exact segment across every scanned file: bring matching episodes into this group at the same length, and split clips that don't match into their own group">Match across all</button>
           <select class="clip-move-sel">
             <option value="">Move to group…</option>
             ${moveOpts}
@@ -561,6 +562,7 @@
     if (applyBtn) applyBtn.addEventListener("click", () => applyClipToAll(c, p, slot));
     slot.querySelector(".clip-reset-btn").addEventListener("click", () => resetClip(c, slot, clipEl));
     slot.querySelector(".clip-fp-btn").addEventListener("click", () => setFingerprintFromClip(c, slot));
+    slot.querySelector(".clip-relocate-btn").addEventListener("click", () => relocateFromClip(c, slot));
     slot.querySelector(".clip-move-sel").addEventListener("change", (e) => {
       const val = e.target.value;
       if (!val) return;
@@ -656,6 +658,30 @@
     } catch (e) {
       toast(e.message, "error");
       fpBtn.disabled = false; fpBtn.textContent = "Use as fingerprint";
+    }
+  }
+
+  // "I found the ad — find it everywhere." Crops the clip (if edited), pins it
+  // as the group's fingerprint, then re-derives the whole group: matches snap to
+  // the same length, new matching episodes are pulled in, and non-matches split
+  // off into their own group.
+  async function relocateFromClip(c, slot) {
+    const start = parseFloat(slot.querySelector(".edit-start").value);
+    const end = parseFloat(slot.querySelector(".edit-end").value);
+    if (!(end - start >= 0.2)) { toast("End must be at least 0.2s after start", "error"); return; }
+    const btn = slot.querySelector(".clip-relocate-btn");
+    btn.disabled = true; btn.textContent = "Matching…";
+    try {
+      const res = await post("/api/clip/relocate", { clip_id: c.id, start, end });
+      state.patterns = res.patterns || state.patterns;
+      renderPatterns();
+      const parts = [`${res.snapped + res.added} clip(s) at ${fmtDur(res.duration)}`];
+      if (res.added) parts.push(`${res.added} new`);
+      if (res.moved_out) parts.push(`${res.moved_out} moved to a new group`);
+      toast(`Matched across files — ${parts.join(", ")}`, "notice");
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false; btn.textContent = "Match across all";
     }
   }
 
