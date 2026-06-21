@@ -31,7 +31,7 @@ fingerprint-alignment problem:
    files. Contiguous runs (gap-bridged, density-checked) become timestamped
    segments.
 4. **Remember.** A found segment is stored as a **pattern** (its fingerprint
-   slice + a label). A single new file can then be trimmed on its own by
+   slice + a review status). A single new file can then be trimmed on its own by
    locating that stored pattern inside it — no peers required.
 
 The matcher is deliberately **fingerprint-agnostic**, so the identical
@@ -46,10 +46,10 @@ algorithm and its tuning dials are documented in
 | Step | What happens |
 | :-- | :-- |
 | **Open a library** | A root folder of show folders. Each is shown as a card with an **audio** or **video** logo and a file count. |
-| **Pick a folder, choose scope** | Scan **all** files (default) or a **selected** subset. |
-| **Scan** | Fingerprints the files, finds recurring segments, matches anything already catalogued, extracts a previewable clip for each, and stores it all. A **live progress tracker** streams the current file, percent complete, and a time-remaining estimate over Server-Sent Events — built for batches of "a ton of media". |
-| **Review duplicates** | Each pattern is a row you can **preview** (in-tool playback) as many times as needed, then **catalogue** as `Ad`, `Intro`, `Outro`, or `Other`. |
-| **Remove the fluff** | Choose which labels to cut (default `Ad`; add `Intro`/`Outro`/`Other`). Trimmed copies are written to `_fluffless_out/`; originals and the catalogue are preserved. |
+| **Scan a folder** | Fingerprints every file, finds the segments that recur across the folder, and groups each into a card. A **live progress tracker** streams the current file, percent complete, and a time-remaining estimate over Server-Sent Events — built for batches of "a ton of media". |
+| **Review a segment** | Each card is one recurring segment with every occurrence beneath it. **Preview** any clip, then **crop** one to the exact ad and **Match across all**: that exact segment is found in every episode and aligned to the same length, while clips that don't match split into their own group. |
+| **Mark as ad** | When the group is clean, mark it an ad (or **Not an ad** to set it aside). Confirming re-finds every airing and folds away redundant duplicate cards automatically. |
+| **Remove the fluff** | Every confirmed segment is cut from every file it occurs in. Trimmed copies are written to `_fluffless_out/`; originals and the catalogue are preserved. |
 | **Export** | The whole database exports to **JSON** (round-trippable) or **Markdown** (inspectable backup). |
 
 Because the catalogue and the processed-file log persist, a folder is a living

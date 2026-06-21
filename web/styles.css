@@ -298,19 +298,6 @@ body { transition: background 0.3s; }
 /* ---------- 9. Scan controls ---------- */
 .control-head { display: flex; align-items: center; justify-content: space-between;
   gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
-.segmented {
-  display: inline-flex; gap: 2px; padding: 3px; border-radius: 2px;
-  border: 1px solid var(--border); background: var(--panel-bg-faint);
-  backdrop-filter: blur(4px);
-}
-.segmented button {
-  background: none; border: none; cursor: pointer; border-radius: 2px;
-  font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em;
-  text-transform: uppercase; color: var(--text-muted); padding: 0.4rem 0.8rem;
-  transition: background 0.15s, color 0.15s;
-}
-.segmented button:hover { background: var(--hover-bg); color: var(--text-heading); }
-.segmented button.active { background: var(--accent-bright); color: var(--on-accent); font-weight: 500; }
 
 /* Collapsible, capped-height file list — a long library never pushes the scan
    button and results off-screen. */
@@ -326,13 +313,6 @@ body { transition: background 0.3s; }
   color: var(--text-dim); border: 1px solid var(--border-faint); background: var(--chip-bg);
   border-radius: 2px; padding: 0.05rem 0.4rem; }
 .head-chip { align-self: center; margin-left: 0.5rem; }
-.files-tools { display: flex; align-items: center; gap: 0.6rem; }
-.files-tools .sel-count { font-family: var(--mono); font-size: 0.62rem; color: var(--text-faint);
-  letter-spacing: 0.04em; }
-.files-tools .tool-sep { color: var(--text-faint); }
-.link-btn { background: none; border: none; cursor: pointer; font-family: var(--mono);
-  font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-amber); padding: 0; }
-.link-btn:hover { color: var(--text-heading); }
 
 .file-list { display: flex; flex-direction: column; gap: 1px; background: var(--border-faint);
   border: 1px solid var(--border-soft); border-radius: 2px; overflow-y: auto; overflow-x: hidden;
@@ -343,8 +323,6 @@ body { transition: background 0.3s; }
 .file-list::-webkit-scrollbar-track { background: transparent; }
 .file-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.6rem 0.8rem;
   background: var(--panel-bg); }
-.file-row.pick { cursor: pointer; }
-.file-row.pick:hover { background: var(--hover-bg); }
 .file-row .fname { font-family: var(--serif); font-size: 0.95rem; color: var(--text-body); flex: 1;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-row .fmeta { font-family: var(--mono); font-size: 0.62rem; color: var(--text-faint);
@@ -358,19 +336,6 @@ body { transition: background 0.3s; }
 .control-foot { display: flex; align-items: flex-end; justify-content: space-between;
   gap: 1rem; margin-top: 1rem; flex-wrap: wrap; }
 .meta-note { font-family: var(--mono); font-size: 0.68rem; color: var(--text-dim); letter-spacing: 0.05em; }
-
-/* check */
-.check { display: flex; align-items: center; gap: 0.6rem; cursor: pointer; user-select: none; }
-.check input { position: absolute; opacity: 0; width: 0; height: 0; }
-.check .box { width: 16px; height: 16px; border: 1px solid var(--border); border-radius: 2px;
-  background: var(--input-bg); display: inline-flex; align-items: center; justify-content: center;
-  transition: background 0.15s, border-color 0.15s; flex: none; }
-.check .box svg { opacity: 0; color: var(--on-accent); }
-.check input:checked + .box { background: var(--accent-bright); border-color: var(--accent-bright); }
-.check input:checked + .box svg { opacity: 1; }
-.check:hover .box { border-color: var(--text-dim); }
-.check input:focus-visible + .box { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.check .clabel { font-size: 0.85rem; color: var(--text-body); }
 
 /* ---------- 10. Progress ---------- */
 .progress { height: 3px; background: var(--border-faint); border-radius: 1px; overflow: hidden; margin-top: 1rem; }
@@ -481,15 +446,9 @@ body { transition: background 0.3s; }
 .icon-btn.danger:hover { color: var(--danger); border-color: var(--danger); background: var(--error-bg); }
 .icon-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
-/* Pattern-level trim panel + per-clip boundary editor */
-.trim-panel { display: flex; align-items: center; gap: 0.75rem 1rem; flex-wrap: wrap;
-  margin-top: 0.85rem; padding: 0.8rem 0.95rem; border: 1px solid var(--border-faint);
-  background: var(--panel-bg-faint); border-radius: 2px; }
-.trim-label { font-family: var(--serif); font-style: italic; color: var(--text-muted); font-size: 0.95rem; }
-.trim-field, .edit-fields label { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em;
+/* Per-clip boundary editor */
+.edit-fields label { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--text-dim); display: flex; align-items: center; gap: 0.4rem; }
-.trim-hint { font-family: var(--serif); font-style: italic; font-size: 0.78rem; color: var(--text-faint);
-  flex-basis: 100%; }
 .num-input { width: 4rem; background: var(--input-bg); border: 1px solid var(--border); border-radius: 2px;
   color: var(--text-strong); font-family: var(--mono); font-size: 0.78rem; padding: 0.3rem 0.4rem;
   text-align: center; -webkit-appearance: none; appearance: none; }
@@ -501,10 +460,6 @@ body { transition: background 0.3s; }
 .edit-fields { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
 .edit-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
   padding-top: 0.55rem; border-top: 1px solid var(--border-faint); }
-.clip-move-sel { font-family: var(--mono); font-size: 0.7rem; background: var(--panel-bg);
-  border: 1px solid var(--border); color: var(--text-muted); border-radius: 2px;
-  padding: 0.28rem 0.5rem; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
-.clip-move-sel:hover { border-color: var(--accent-amber); color: var(--text-heading); }
 .edit-hint { font-family: var(--serif); font-style: italic; font-size: 0.78rem; color: var(--text-faint);
   margin: 0; }
 .edit-hint em { color: var(--text-muted); }

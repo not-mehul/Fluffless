@@ -282,58 +282,6 @@ class Database:
         )
         self.conn.commit()
 
-    def set_fingerprint_from_clip(self, clip_id: int) -> dict | None:
-        """Use one clip's *current* (possibly hand-cropped) bounds as the saved
-        fingerprint for its pattern. Slices the clip's cached file fingerprint
-        over those bounds and pins it — so future scans look for exactly that,
-        not the surrounding content. Other clips keep their own bounds."""
-        clip = self.clip(clip_id)
-        if clip is None:
-            return None
-        fp = self.get_fingerprint(clip["file_path"])
-        if fp is None:
-            return {"error": "no cached fingerprint for this file — re-scan the folder first"}
-        items = list(fp.slice_seconds(clip["start"], clip["end"]))
-        if len(items) < 1:
-            return {"error": "selection is too short to fingerprint"}
-        dur = max(fp.item_sec, clip["end"] - clip["start"])
-        self.pin_fingerprint(clip["pattern_id"], items, dur)
-        return {"pattern_id": clip["pattern_id"], "items": len(items), "duration": dur}
-
-    def reset_pattern(self, pattern_id: int) -> int | None:
-        """Reset a pattern to its detected default: restore the baseline
-        fingerprint, drop any head/tail refinement and the pinned flag, and
-        return every clip to its detected bounds. Returns clips restored."""
-        row = self.pattern(pattern_id)
-        if row is None:
-            return None
-        keys = row.keys()
-        orig_items = row["orig_items"] if "orig_items" in keys else None
-        orig_dur = row["orig_duration"] if "orig_duration" in keys else None
-        if orig_items:
-            self.conn.execute(
-                "UPDATE patterns SET items = ?, duration = ?, head_items = 0, "
-                "tail_items = 0, pinned = 0, updated_at = ? WHERE id = ?",
-                (orig_items, orig_dur if orig_dur is not None else row["duration"],
-                 _now(), pattern_id),
-            )
-        else:
-            self.conn.execute(
-                "UPDATE patterns SET head_items = 0, tail_items = 0, pinned = 0, "
-                "updated_at = ? WHERE id = ?",
-                (_now(), pattern_id),
-            )
-        n = 0
-        for c in self.clips(pattern_id):
-            os_, oe = self._orig_bounds(c)
-            self.conn.execute(
-                "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
-                (os_, oe, c["id"]),
-            )
-            n += 1
-        self.conn.commit()
-        return n
-
     def reset_clip(self, clip_id: int) -> tuple[float, float] | None:
         """Return one clip to its detected bounds (clearing its stale preview).
         Leaves the pattern fingerprint untouched."""
@@ -418,64 +366,6 @@ class Database:
         self.conn.commit()
         return {"new_pattern_id": new_id, "from": clip["pattern_id"],
                 "deleted_source": deleted, "folder": src["folder"]}
-
-    def trim_pattern(self, pattern_id: int, head: float, tail: float) -> int | None:
-        """Set a pattern's refinement to ``head``/``tail`` seconds: tighten the
-        stored fingerprint (so future scans locate just this, not the
-        surrounding content) and move every clip's bounds to its *original*
-        detected start/end shifted inward by the same amounts.
-
-        This is **absolute and idempotent** — applying the same trim twice is a
-        no-op, and it is the operation behind both the manual trim panel and
-        "apply one refined clip to all" (see :meth:`propagate_from_clip`).
-        Returns the number of clips adjusted, or None if the pattern is unknown.
-        """
-        row = self.pattern(pattern_id)
-        if row is None:
-            return None
-        head = max(0.0, head)
-        tail = max(0.0, tail)
-        item_sec = row["item_sec"] or 0.1238
-        n_items = len(json.loads(row["items"]))
-        h = min(round(head / item_sec), n_items - 1)
-        t = min(round(tail / item_sec), max(0, n_items - 1 - h))
-        new_dur = max(item_sec, (n_items - h - t) * item_sec)
-        self.conn.execute(
-            "UPDATE patterns SET head_items = ?, tail_items = ?, duration = ?, "
-            "pinned = ?, updated_at = ? WHERE id = ?",
-            (h, t, new_dur, 1 if (h or t) else 0, _now(), pattern_id),
-        )
-        n = 0
-        for c in self.clips(pattern_id):
-            os_, oe = self._orig_bounds(c)
-            ns = os_ + head
-            ne = oe - tail
-            if ne - ns < 0.2:                     # never collapse a clip to nothing
-                ne = ns + 0.2
-            self.conn.execute(
-                "UPDATE clips SET start = ?, end = ?, preview = NULL WHERE id = ?",
-                (ns, ne, c["id"]),
-            )
-            n += 1
-        self.conn.commit()
-        return n
-
-    def propagate_from_clip(self, clip_id: int) -> tuple[int, float, float] | None:
-        """Take one hand-refined clip as the reference and apply its correction
-        to **every** clip of the same pattern: the head/tail it trimmed off its
-        detected bounds become the pattern's refinement. Returns
-        (clips_adjusted, head_seconds, tail_seconds), or None if unknown.
-
-        This is the "I fixed one, fix the other 100 the same way" operation.
-        """
-        ref = self.clip(clip_id)
-        if ref is None:
-            return None
-        os_, oe = self._orig_bounds(ref)
-        head = max(0.0, ref["start"] - os_)
-        tail = max(0.0, oe - ref["end"])
-        n = self.trim_pattern(ref["pattern_id"], head, tail)
-        return (n or 0, head, tail)
 
     @staticmethod
     def _orig_bounds(clip: sqlite3.Row) -> tuple[float, float]:
