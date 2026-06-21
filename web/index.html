@@ -47,7 +47,10 @@
         <div class="field-row">
           <input class="input mono" id="libraryInput" type="text" spellcheck="false"
                  placeholder="/path/to/your/media  ·  a folder of show folders" />
-          <button class="btn-primary" id="openBtn"><span class="btn-label">Open</span></button>
+          <button class="btn-primary" id="openBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
+            <span class="btn-label">Open</span></button>
         </div>
         <div class="engine-row" id="engineRow"></div>
         <p class="hint"><em>Engines.</em> <span class="mono">fpcalc</span> fingerprints audio,
@@ -66,7 +69,10 @@
 
     <!-- Folder workspace -->
     <section class="section hidden" id="workspaceSection">
-      <button class="btn-back" id="backBtn">← All media</button>
+      <button class="btn-back" id="backBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+        All media</button>
 
       <div class="section-head">
         <span class="marker" id="wsMarker">Folder.</span>
@@ -94,7 +100,8 @@
         <div class="files" id="filesBlock">
           <div class="files-head">
             <button class="files-toggle" id="filesToggle" aria-expanded="true" aria-controls="fileList">
-              <span class="chev" aria-hidden="true">▾</span>
+              <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               <span class="field-label">Files</span>
               <span class="count-chip" id="filesCount">0</span>
             </button>
@@ -111,7 +118,10 @@
         <div class="control-foot">
           <p class="hint" id="scanHint"><em>Scan.</em> Fingerprints each file, finds segments
             that recur across the set, and matches anything already catalogued.</p>
-          <button class="btn-primary" id="scanBtn"><span class="btn-label">Scan media</span></button>
+          <button class="btn-primary" id="scanBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+            <span class="btn-label">Scan media</span></button>
         </div>
         <div class="scan-status hidden" id="scanStatus">
           <div class="scan-line">
@@ -147,7 +157,10 @@
         <div class="check-grid" id="removeLabels"></div>
         <div class="control-foot">
           <span class="meta-note" id="removeSummary"></span>
-          <button class="btn-danger" id="removeBtn">Remove the fluff</button>
+          <button class="btn-danger" id="removeBtn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/></svg>
+            <span class="btn-label">Remove the fluff</span></button>
         </div>
         <div class="scan-status hidden" id="removeStatus">
           <div class="scan-line">
