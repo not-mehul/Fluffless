@@ -702,9 +702,10 @@
       state.patterns = res.patterns || state.patterns;
       renderPatterns();
       if (res.status === "confirmed") {
-        toast(res.applied_to
-          ? `Confirmed — found ${res.applied_to} occurrence${res.applied_to === 1 ? "" : "s"} across your files`
-          : "Confirmed as an ad — will be removed", "notice");
+        const parts = [];
+        if (res.applied_to) parts.push(`found ${res.applied_to} occurrence${res.applied_to === 1 ? "" : "s"} across your files`);
+        if (res.absorbed) parts.push(`dismissed ${res.absorbed} overlapping card${res.absorbed === 1 ? "" : "s"}`);
+        toast(parts.length ? `Confirmed — ${parts.join(", ")}` : "Confirmed as an ad — will be removed", "notice");
       } else if (res.status === "dismissed") {
         toast("Set aside — won't be removed", "notice");
       } else {
