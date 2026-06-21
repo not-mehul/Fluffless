@@ -25,7 +25,7 @@ from .clips import OUT_DIR, extract_preview, remove_segments
 from .db import LABELS, Database
 from .media import scan_library
 from .repetition import DetectParams
-from .scan import scan_folder
+from .scan import apply_pattern_to_stored, scan_folder
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 PREVIEW_DIR = "previews"
@@ -460,8 +460,22 @@ class Handler(BaseHTTPRequestHandler):
         label = body.get("label")
         if label not in LABELS:
             return self._error(f"label must be one of {LABELS}")
-        self.state.db.set_label(int(pid), label)
-        self._json({"ok": True})
+        st = self.state
+        st.db.set_label(int(pid), label)
+        # Identifying an ad turns its fingerprint into a known signature: locate
+        # it across every cached file in the folder and tag any occurrences that
+        # were scanned before this ad was known. Only ads — pointless for others.
+        applied = 0
+        folder = None
+        if label == "Ad":
+            applied = apply_pattern_to_stored(st.db, int(pid))
+            row = st.db.pattern(int(pid))
+            folder = row["folder"] if row else None
+        self._json({
+            "ok": True,
+            "applied_to": applied,
+            "patterns": patterns_payload(st.db, folder) if applied else None,
+        })
 
     # --- API: remove the fluff -----------------------------------------------
 
