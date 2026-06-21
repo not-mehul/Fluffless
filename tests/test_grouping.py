@@ -38,3 +38,36 @@ def test_short_and_long_segments_stay_separate():
         durs = sorted(round(r["duration"]) for r in db.patterns("Show"))
         assert durs[0] < 0.85 * durs[1]           # clearly distinct lengths
         db.close()
+
+
+def test_normalize_pattern_lengths_fixes_clipped_outlier():
+    """A clip whose boundary was detected short is re-located to the canonical
+    fingerprint, so all occurrences of one ad end up the same length."""
+    import random
+    from fluffless.repetition import Fingerprint
+    from fluffless.scan import _normalize_pattern_lengths
+
+    rng = random.Random(3)
+    ad = [rng.getrandbits(32) for _ in range(1000)]
+    isec = 0.1239
+    fps = {}
+    layout = []
+    for k in range(4):
+        head = [rng.getrandbits(32) for _ in range(rng.randint(50, 200))]
+        items = head + [v ^ (1 << rng.randint(0, 31)) for v in ad] + \
+            [rng.getrandbits(32) for _ in range(300)]
+        path = f"/x/ep{k}.mp3"
+        fps[path] = Fingerprint(items=items, item_sec=isec, bits=32)
+        layout.append((path, len(head)))
+
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        p = DetectParams()
+        pid = db.add_pattern(root, "Show", ad, isec, 32, 1000 * isec, "Ad")
+        for i, (path, head) in enumerate(layout):
+            length = 700 if i == 3 else 1000          # ep3 clipped short
+            db.add_clip(pid, path, head * isec, (head + length) * isec)
+        _normalize_pattern_lengths(db, [pid], fps, p)
+        lengths = sorted(round(c["end"] - c["start"], 1) for c in db.clips(pid))
+        assert max(lengths) - min(lengths) < 2.0       # all consistent now
+        db.close()
