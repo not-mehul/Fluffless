@@ -112,6 +112,57 @@ def test_relocate_catches_repeat_airing_in_one_file():
         db.close()
 
 
+def test_relocate_no_split_preserves_existing_clips():
+    """Without split_nonmatches, clips that can't be re-located are NOT evicted."""
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        isec = 0.1239
+        rng = random.Random(13)
+        ad = [rng.getrandbits(32) for _ in range(300)]
+        epA = _noise(rng, 50) + _fuzz(rng, ad) + _noise(rng, 100)
+        # epB has a very noisy version — may not locate.
+        epB_noise = [rng.getrandbits(32) for _ in range(300)]
+        epB = _noise(rng, 80) + epB_noise + _noise(rng, 90)
+        db.store_fingerprint("/x/epA.mp3", "Show", Fingerprint(epA, isec, 32))
+        db.store_fingerprint("/x/epB.mp3", "Show", Fingerprint(epB, isec, 32))
+
+        pid = db.add_pattern(root, "Show", ad, isec, 32, len(ad) * isec, "pending")
+        cA = db.add_clip(pid, "/x/epA.mp3", 50 * isec, (50 + 300) * isec)
+        db.add_clip(pid, "/x/epB.mp3", 80 * isec, (80 + 300) * isec)
+
+        # split_nonmatches=False (the default for unedited clips) — epB stays put
+        # even if locate_all can't find it.
+        res = relocate_group_from_clip(db, cA, split_nonmatches=False)
+        assert res["moved_out"] == 0
+        files = sorted(c["file_name"] for c in db.clips(pid))
+        assert "epB.mp3" in files
+        db.close()
+
+
+def test_relocate_with_split_moves_nonmatches():
+    """With split_nonmatches=True (explicit crop), unlocatable clips are moved out."""
+    with tempfile.TemporaryDirectory() as root:
+        db = Database.open(root)
+        isec = 0.1239
+        rng = random.Random(14)
+        ad = [rng.getrandbits(32) for _ in range(300)]
+        epA = _noise(rng, 50) + _fuzz(rng, ad) + _noise(rng, 100)
+        epB_noise = [rng.getrandbits(32) for _ in range(300)]
+        epB = _noise(rng, 80) + epB_noise + _noise(rng, 90)
+        db.store_fingerprint("/x/epA.mp3", "Show", Fingerprint(epA, isec, 32))
+        db.store_fingerprint("/x/epB.mp3", "Show", Fingerprint(epB, isec, 32))
+
+        pid = db.add_pattern(root, "Show", ad, isec, 32, len(ad) * isec, "pending")
+        cA = db.add_clip(pid, "/x/epA.mp3", 50 * isec, (50 + 300) * isec)
+        db.add_clip(pid, "/x/epB.mp3", 80 * isec, (80 + 300) * isec)
+
+        res = relocate_group_from_clip(db, cA, split_nonmatches=True)
+        assert res["moved_out"] == 1   # epB, which has unrelated audio, is evicted
+        files = sorted(c["file_name"] for c in db.clips(pid))
+        assert "epB.mp3" not in files
+        db.close()
+
+
 def test_relocate_missing_fingerprint_reports_error():
     with tempfile.TemporaryDirectory() as root:
         db = Database.open(root)

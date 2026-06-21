@@ -191,6 +191,7 @@ def scan_folder(
 
 def relocate_group_from_clip(
     db: Database, clip_id: int, base: DetectParams | None = None,
+    split_nonmatches: bool = True,
 ) -> dict | None:
     """Re-derive a whole group from one hand-cropped clip.
 
@@ -201,8 +202,10 @@ def relocate_group_from_clip(
       * occurrences that line up with a clip already in the group are snapped to
         the cropped length, so every member is the same exact segment;
       * files that contain the segment but weren't in the group are pulled in;
-      * clips that no longer contain the segment are moved out into a new group —
-        they're a different ad, to be reviewed on their own.
+      * if ``split_nonmatches`` is True: clips that no longer contain the segment
+        are moved out into a new group — they're a different ad to review.
+        When False (clip was not cropped), existing clips that can't be re-located
+        are left in place rather than evicted; only the snap and pull-in steps run.
 
     The result: one tight group of identical-length occurrences the user can
     confirm together. Returns a summary dict (or ``{"error": ...}`` / ``None``).
@@ -256,7 +259,8 @@ def relocate_group_from_clip(
                 hit = (i, ts, te)
                 break
         if hit is None:
-            nonmatch_ids.append(c["id"])
+            if split_nonmatches:
+                nonmatch_ids.append(c["id"])
             continue
         i, ts, te = hit
         consumed.add((c["file_path"], i))

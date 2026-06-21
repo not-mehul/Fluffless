@@ -712,6 +712,7 @@ class Handler(BaseHTTPRequestHandler):
         clip = st.db.clip(int(body.get("clip_id")))
         if not clip:
             return self._error("unknown clip", 404)
+        split_nonmatches = False
         if body.get("start") is not None and body.get("end") is not None:
             try:
                 start = max(0.0, float(body["start"]))
@@ -720,9 +721,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error("start and end must be numbers")
             if end - start < 0.2:
                 return self._error("end must be at least 0.2s after start")
+            # Only split non-matches when the user actually cropped the clip —
+            # i.e. meaningfully different from the detected bounds. Without an
+            # explicit crop the operation is pure discovery: snap + pull in,
+            # never evict an existing clip.
+            orig_s = clip["orig_start"] if clip["orig_start"] is not None else clip["start"]
+            orig_e = clip["orig_end"] if clip["orig_end"] is not None else clip["end"]
+            if abs(start - orig_s) > 1.0 or abs(end - orig_e) > 1.0:
+                split_nonmatches = True
             st.db.update_clip_bounds(clip["id"], start, end)
             self._rebuild_preview(clip["id"])
-        res = relocate_group_from_clip(st.db, clip["id"])
+        res = relocate_group_from_clip(st.db, clip["id"], split_nonmatches=split_nonmatches)
         if res is None:
             return self._error("unknown clip", 404)
         if "error" in res:
