@@ -70,4 +70,9 @@ def test_normalize_pattern_lengths_fixes_clipped_outlier():
         _normalize_pattern_lengths(db, [pid], fps, p)
         lengths = sorted(round(c["end"] - c["start"], 1) for c in db.clips(pid))
         assert max(lengths) - min(lengths) < 2.0       # all consistent now
+        # The pattern's stored duration tracks its clips (no fingerprint/clip
+        # length mismatch).
+        pat = db.pattern(pid)
+        assert abs(pat["duration"] - lengths[0]) < 2.0
+        assert abs(len(db.pattern_items(pat)) * isec - lengths[0]) < 2.0
         db.close()
